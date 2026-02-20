@@ -22,7 +22,7 @@ STATE_FILE = Path(os.getenv("STATE_FILE", "state.json"))
 PROCESS_ONCE = os.getenv("PROCESS_ONCE", "1").strip() == "1"
 TEST_USER_ID = int(os.getenv("TEST_USER_ID", "0"))
 
-MEETING_TEXT = (
+MEETING_TEXT_FALLBACK = (
     "Ну що, обговорюємо?\n"
     "На яку годину збираємось?\n\n"
     "Відповідайте РЕПЛАЄМ на це повідомлення:\n"
@@ -114,6 +114,49 @@ def normalize_vote(text: str):
     return None
 
 
+def split_command_and_args(text: str):
+    parts = text.strip().split(maxsplit=1)
+    if not parts:
+        return "", ""
+    cmd = parts[0].lower()
+    args = parts[1].strip() if len(parts) > 1 else ""
+    return cmd, args
+
+
+def normalize_meeting_date(value: str) -> str:
+    low = value.strip().lower()
+    if low in {"сьогодні", "сьогоднi", "today"}:
+        return "Сьогодні"
+    if low in {"завтра", "tomorrow"}:
+        return "Завтра"
+    return value.strip() or "Не вказано"
+
+
+def build_meeting_text(args: str) -> str:
+    # format: /meeting <date> | <place> | <text>
+    if not args:
+        return MEETING_TEXT_FALLBACK
+    parts = [p.strip() for p in args.split("|")]
+    if len(parts) >= 3:
+        date = normalize_meeting_date(parts[0])
+        place = parts[1] or "Не вказано"
+        topic = parts[2] or "Зустріч"
+        return (
+            f"Збір: {topic}\n"
+            f"Дата: {date}\n"
+            f"Місце: {place}\n\n"
+            "Відповідайте РЕПЛАЄМ на це повідомлення:\n"
+            "+, +1, йду, я за, пирйду, я в темі, я буду = прийду\n"
+            "-, -1, не йду = не прийду"
+        )
+    return (
+        f"Збір: {args}\n\n"
+        "Відповідайте РЕПЛАЄМ на це повідомлення:\n"
+        "+, +1, йду, я за, пирйду, я в темі, я буду = прийду\n"
+        "-, -1, не йду = не прийду"
+    )
+
+
 def user_display_name(sender) -> str:
     username = getattr(sender, "username", None)
     if username:
@@ -179,6 +222,7 @@ async def handle_message(event):
 
     text = event.raw_text.strip()
     text_lower = text.lower()
+    command, command_args = split_command_and_args(text)
     user_id = event.sender_id
 
     if event.is_channel and target_channel_id is not None:
@@ -191,9 +235,9 @@ async def handle_message(event):
         chat_key = str(chat_id)
         active_event = events_state.get(chat_key)
 
-        if text_lower in ADMIN_MEETING_COMMANDS:
+        if command in ADMIN_MEETING_COMMANDS:
             if is_admin:
-                posted = await client.send_message(chat, MEETING_TEXT)
+                posted = await client.send_message(chat, build_meeting_text(command_args))
                 events_state[chat_key] = {
                     "message_id": int(posted.id),
                     "is_open": True,
@@ -207,7 +251,7 @@ async def handle_message(event):
                     pass
             return
 
-        if text_lower in ADMIN_FINAL_COMMANDS:
+        if command in ADMIN_FINAL_COMMANDS:
             if is_admin:
                 await client.send_message(chat, FINAL_TEXT)
                 try:
@@ -216,7 +260,7 @@ async def handle_message(event):
                     pass
             return
 
-        if text_lower in ADMIN_WHO_COMMANDS:
+        if command in ADMIN_WHO_COMMANDS:
             if is_admin:
                 if active_event:
                     await client.send_message(chat, render_rsvp_summary(active_event))
@@ -228,7 +272,7 @@ async def handle_message(event):
                     pass
             return
 
-        if text_lower in ADMIN_CLOSE_COMMANDS:
+        if command in ADMIN_CLOSE_COMMANDS:
             if is_admin:
                 if active_event and active_event.get("is_open", True):
                     active_event["is_open"] = False
