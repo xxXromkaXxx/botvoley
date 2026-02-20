@@ -28,18 +28,17 @@ MEETING_TEXT_FALLBACK = (
     "+ якщо будете\n"
     "- якщо не будете"
 )
-FINAL_TEXT = (
-    "Фіксуємо фінальне рішення:\n"
-    "День: ___\n"
-    "Час: ___\n"
-    "Формат/місце: ___"
-)
 ADMIN_MEETING_COMMANDS = {"/meeting", "/discuss", "/збір", "/обговорення"}
 ADMIN_WHO_COMMANDS = {"/who", "/rsvp", "/хто"}
 ADMIN_CLOSE_COMMANDS = {"/close", "/закрити"}
 ADMIN_FINAL_COMMANDS = {"/final", "/підсумок"}
+ADMIN_HELP_COMMANDS = {"/help", "/команди"}
 ALL_ADMIN_COMMANDS = (
-    ADMIN_MEETING_COMMANDS | ADMIN_WHO_COMMANDS | ADMIN_CLOSE_COMMANDS | ADMIN_FINAL_COMMANDS
+    ADMIN_MEETING_COMMANDS
+    | ADMIN_WHO_COMMANDS
+    | ADMIN_CLOSE_COMMANDS
+    | ADMIN_FINAL_COMMANDS
+    | ADMIN_HELP_COMMANDS
 )
 YES_MARKERS = {"+", "+1", "йду", "я за", "пирйду", "прийду", "я в темі", "я буду"}
 NO_MARKERS = {"-", "-1", "не йду"}
@@ -76,6 +75,9 @@ def load_state() -> dict:
                 "message_id": msg_id,
                 "is_open": bool(payload.get("is_open", True)),
                 "started_at_message_id": int(payload.get("started_at_message_id", msg_id)),
+                "topic": str(payload.get("topic", "Зустріч")),
+                "date": str(payload.get("date", "Не вказано")),
+                "place": str(payload.get("place", "Не вказано")),
                 "participants": {
                     str(uid): str(name) for uid, name in payload.get("participants", {}).items()
                 },
@@ -98,6 +100,9 @@ def save_state(state: dict) -> None:
             "started_at_message_id": int(
                 event_data.get("started_at_message_id", event_data.get("message_id", 0))
             ),
+            "topic": str(event_data.get("topic", "Зустріч")),
+            "date": str(event_data.get("date", "Не вказано")),
+            "place": str(event_data.get("place", "Не вказано")),
             "participants": {
                 str(uid): str(name) for uid, name in event_data.get("participants", {}).items()
             },
@@ -148,16 +153,21 @@ def normalize_meeting_date(value: str) -> str:
     return value.strip() or "Не вказано"
 
 
-def build_meeting_text(args: str) -> str:
+def parse_meeting_payload(args: str) -> dict:
     # format: /meeting <date> | <place> | <text>
     if not args:
-        return MEETING_TEXT_FALLBACK
+        return {
+            "topic": "Зустріч",
+            "date": "Не вказано",
+            "place": "Не вказано",
+            "text": MEETING_TEXT_FALLBACK,
+        }
     parts = [p.strip() for p in args.split("|")]
     if len(parts) >= 3:
         date = normalize_meeting_date(parts[0])
         place = parts[1] or "Не вказано"
         topic = parts[2] or "Зустріч"
-        return (
+        text = (
             f"Збір: {topic}\n"
             f"Дата: {date}\n"
             f"Місце: {place}\n\n"
@@ -165,12 +175,17 @@ def build_meeting_text(args: str) -> str:
             "+ якщо будете\n"
             "- якщо не будете"
         )
-    return (
-        f"Збір: {args}\n\n"
+        return {"topic": topic, "date": date, "place": place, "text": text}
+
+    text = (
+        f"Збір: {args}\n"
+        "Дата: Не вказано\n"
+        "Місце: Не вказано\n\n"
         "Голосування: відповідайте реплаєм на це повідомлення\n"
         "+ якщо будете\n"
         "- якщо не будете"
     )
+    return {"topic": args, "date": "Не вказано", "place": "Не вказано", "text": text}
 
 
 def user_display_name(sender) -> str:
@@ -194,6 +209,39 @@ def render_rsvp_summary(event_data: dict) -> str:
     for idx, name in enumerate(names, start=1):
         lines.append(f"{idx}. {name}")
     return "\n".join(lines)
+
+
+def render_final_event_text(event_data: dict, final_time: str) -> str:
+    topic = event_data.get("topic", "Зустріч")
+    date = event_data.get("date", "Не вказано")
+    place = event_data.get("place", "Не вказано")
+    time_value = final_time.strip() if final_time.strip() else "Не вказано"
+    return (
+        f"Фінал: {topic}\n"
+        f"Дата: {date}\n"
+        f"Час: {time_value}\n"
+        f"Місце: {place}\n\n"
+        f"{render_rsvp_summary(event_data)}"
+    )
+
+
+def build_help_text() -> str:
+    return (
+        "Команди управління (писати в приват):\n\n"
+        "/meeting <дата> | <місце> | <текст>\n"
+        "Запустити збір.\n\n"
+        "/who\n"
+        "Показати поточну кількість і список учасників.\n\n"
+        "/close <час>\n"
+        "Закрити збір і опублікувати фінал.\n\n"
+        "/final <час>\n"
+        "Те саме, що /close.\n\n"
+        "/help\n"
+        "Показати цю довідку.\n\n"
+        "Приклад:\n"
+        "/meeting сьогодні | Аркадія, 2 майданчик | волейбол\n"
+        "/close 19:30"
+    )
 
 
 async def sender_is_admin(chat, user_id: int) -> bool:
@@ -271,6 +319,10 @@ async def handle_message(event):
 
     # Private admin control: any user who is admin in target channel/group can manage events from private chat.
     if event.is_private and command in ALL_ADMIN_COMMANDS:
+        if command in ADMIN_HELP_COMMANDS:
+            await client.send_message(event.chat_id, build_help_text())
+            return
+
         if channel_entity is None:
             await client.send_message(
                 event.chat_id,
@@ -291,11 +343,15 @@ async def handle_message(event):
         active_event = events_state.get(target_chat_key)
 
         if command in ADMIN_MEETING_COMMANDS:
-            posted = await client.send_message(target_chat, build_meeting_text(command_args))
+            payload = parse_meeting_payload(command_args)
+            posted = await client.send_message(target_chat, payload["text"])
             events_state[target_chat_key] = {
                 "message_id": int(posted.id),
                 "is_open": True,
                 "started_at_message_id": int(posted.id),
+                "topic": payload["topic"],
+                "date": payload["date"],
+                "place": payload["place"],
                 "participants": {},
             }
             state["events"] = events_state
@@ -316,16 +372,24 @@ async def handle_message(event):
                 events_state[target_chat_key] = active_event
                 state["events"] = events_state
                 save_state(state)
-                summary = render_rsvp_summary(active_event)
-                await client.send_message(target_chat, "Збір закрито.\n\n" + summary)
+                final_post = render_final_event_text(active_event, command_args)
+                await client.send_message(target_chat, "Збір закрито.\n\n" + final_post)
                 await client.send_message(event.chat_id, "Збір закрито.")
             else:
                 await client.send_message(event.chat_id, "Активного збору немає. Запусти /meeting")
             return
 
         if command in ADMIN_FINAL_COMMANDS:
-            await client.send_message(target_chat, FINAL_TEXT)
-            await client.send_message(event.chat_id, "Підсумок відправлено.")
+            if active_event and active_event.get("is_open", True):
+                active_event["is_open"] = False
+                events_state[target_chat_key] = active_event
+                state["events"] = events_state
+                save_state(state)
+                final_post = render_final_event_text(active_event, command_args)
+                await client.send_message(target_chat, "Збір закрито.\n\n" + final_post)
+                await client.send_message(event.chat_id, "Фінал відправлено, збір закрито.")
+            else:
+                await client.send_message(event.chat_id, "Активного збору немає. Запусти /meeting")
             return
 
     if event.is_group or event.is_channel:
