@@ -208,7 +208,6 @@ awaiting_intro_users = set(state["awaiting_intro_users"])
 events_state = state["events"]
 client = TelegramClient(StringSession(SESSION_STRING), API_ID, API_HASH)
 channel_entity = None
-target_channel_id = None
 
 
 @client.on(events.NewMessage(incoming=True))
@@ -225,11 +224,9 @@ async def handle_message(event):
     command, command_args = split_command_and_args(text)
     user_id = event.sender_id
 
-    if event.is_channel and target_channel_id is not None:
+    if event.is_group or event.is_channel:
         chat = await event.get_chat()
         chat_id = int(getattr(chat, "id", 0) or 0)
-        if chat_id != int(target_channel_id):
-            return
 
         is_admin = await sender_is_admin(chat, user_id)
         chat_key = str(chat_id)
@@ -360,7 +357,7 @@ async def handle_message(event):
 
 
 async def main():
-    global channel_entity, target_channel_id
+    global channel_entity
 
     print("Starting intro bot...", flush=True)
     await client.connect()
@@ -368,7 +365,6 @@ async def main():
         raise RuntimeError("Session is not authorized. Regenerate SESSION_STRING.")
 
     channel_entity = await resolve_channel_entity_safe()
-    target_channel_id = int(getattr(channel_entity, "id", 0) or 0) if channel_entity else None
 
     me = await client.get_me()
     print(f"Started as {me.id}", flush=True)
