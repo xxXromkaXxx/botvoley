@@ -38,6 +38,9 @@ ADMIN_MEETING_COMMANDS = {"/meeting", "/discuss", "/збір", "/обговор�
 ADMIN_WHO_COMMANDS = {"/who", "/rsvp", "/хто"}
 ADMIN_CLOSE_COMMANDS = {"/close", "/закрити"}
 ADMIN_FINAL_COMMANDS = {"/final", "/підсумок"}
+ALL_ADMIN_COMMANDS = (
+    ADMIN_MEETING_COMMANDS | ADMIN_WHO_COMMANDS | ADMIN_CLOSE_COMMANDS | ADMIN_FINAL_COMMANDS
+)
 YES_MARKERS = {"+", "+1", "йду", "я за", "пирйду", "прийду", "я в темі", "я буду"}
 NO_MARKERS = {"-", "-1", "не йду"}
 
@@ -267,52 +270,62 @@ async def handle_message(event):
     user_id = event.sender_id
 
     # Private admin control: any user who is admin in target channel/group can manage events from private chat.
-    if event.is_private and channel_entity is not None:
-        is_admin_in_target = await sender_is_admin(channel_entity, user_id)
-        if is_admin_in_target:
-            target_chat = channel_entity
-            target_chat_key = str(int(getattr(target_chat, "id", 0) or 0))
-            active_event = events_state.get(target_chat_key)
+    if event.is_private and command in ALL_ADMIN_COMMANDS:
+        if channel_entity is None:
+            await client.send_message(
+                event.chat_id,
+                f"Не можу знайти CHANNEL_ID={CHANNEL_ID_RAW}. Перевір, що акаунт із SESSION_STRING є в цьому чаті.",
+            )
+            return
 
-            if command in ADMIN_MEETING_COMMANDS:
-                posted = await client.send_message(target_chat, build_meeting_text(command_args))
-                events_state[target_chat_key] = {
-                    "message_id": int(posted.id),
-                    "is_open": True,
-                    "started_at_message_id": int(posted.id),
-                    "participants": {},
-                }
+        is_admin_in_target = await sender_is_admin(channel_entity, user_id)
+        if not is_admin_in_target:
+            await client.send_message(
+                event.chat_id,
+                f"Доступ заборонено: user_id={user_id} не адмін у чаті CHANNEL_ID={CHANNEL_ID_RAW}.",
+            )
+            return
+
+        target_chat = channel_entity
+        target_chat_key = str(int(getattr(target_chat, "id", 0) or 0))
+        active_event = events_state.get(target_chat_key)
+
+        if command in ADMIN_MEETING_COMMANDS:
+            posted = await client.send_message(target_chat, build_meeting_text(command_args))
+            events_state[target_chat_key] = {
+                "message_id": int(posted.id),
+                "is_open": True,
+                "started_at_message_id": int(posted.id),
+                "participants": {},
+            }
+            state["events"] = events_state
+            save_state(state)
+            await client.send_message(event.chat_id, "Збір створено.")
+            return
+
+        if command in ADMIN_WHO_COMMANDS:
+            if active_event:
+                await client.send_message(event.chat_id, render_rsvp_summary(active_event))
+            else:
+                await client.send_message(event.chat_id, "Активного збору немає. Запусти /meeting")
+            return
+
+        if command in ADMIN_CLOSE_COMMANDS:
+            if active_event and active_event.get("is_open", True):
+                active_event["is_open"] = False
+                events_state[target_chat_key] = active_event
                 state["events"] = events_state
                 save_state(state)
-                await client.send_message(event.chat_id, "Збір створено.")
-                return
+                summary = render_rsvp_summary(active_event)
+                await client.send_message(target_chat, "Збір закрито.\n\n" + summary)
+                await client.send_message(event.chat_id, "Збір закрито.")
+            else:
+                await client.send_message(event.chat_id, "Активного збору немає. Запусти /meeting")
+            return
 
-            if command in ADMIN_WHO_COMMANDS:
-                if active_event:
-                    await client.send_message(event.chat_id, render_rsvp_summary(active_event))
-                else:
-                    await client.send_message(event.chat_id, "Активного збору немає. Запусти /meeting")
-                return
-
-            if command in ADMIN_CLOSE_COMMANDS:
-                if active_event and active_event.get("is_open", True):
-                    active_event["is_open"] = False
-                    events_state[target_chat_key] = active_event
-                    state["events"] = events_state
-                    save_state(state)
-                    summary = render_rsvp_summary(active_event)
-                    await client.send_message(target_chat, "Збір закрито.\n\n" + summary)
-                    await client.send_message(event.chat_id, "Збір закрито.")
-                else:
-                    await client.send_message(event.chat_id, "Активного збору немає. Запусти /meeting")
-                return
-
-            if command in ADMIN_FINAL_COMMANDS:
-                await client.send_message(target_chat, FINAL_TEXT)
-                await client.send_message(event.chat_id, "Підсумок відправлено.")
-                return
-
-            # Admin private chats are command-only.
+        if command in ADMIN_FINAL_COMMANDS:
+            await client.send_message(target_chat, FINAL_TEXT)
+            await client.send_message(event.chat_id, "Підсумок відправлено.")
             return
 
     if event.is_group or event.is_channel:
@@ -427,6 +440,8 @@ async def main():
     print(f"Started as {me.id}", flush=True)
     print(f"Keywords: {', '.join(KEYWORDS)}", flush=True)
     print(f"Channel ref: {CHANNEL_REF}", flush=True)
+    if channel_entity is not None:
+        print(f"Resolved channel entity id: {getattr(channel_entity, 'id', 'unknown')}", flush=True)
     print(f"Process once: {PROCESS_ONCE}", flush=True)
 
     await client(UpdateStatusRequest(offline=True))
