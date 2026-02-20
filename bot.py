@@ -2,6 +2,7 @@ import asyncio
 import html
 import json
 import os
+import re
 from pathlib import Path
 
 from telethon import TelegramClient, events
@@ -25,7 +26,7 @@ TEST_USER_ID = int(os.getenv("TEST_USER_ID", "0"))
 MEETING_TEXT_FALLBACK = (
     "Ну що, збираємось?\n"
     "Напишіть реплаєм на це повідомлення:\n"
-    "+ якщо будете\n"
+    "+ або + 19:00 якщо будете\n"
     "- якщо не будете"
 )
 ADMIN_MEETING_COMMANDS = {"/meeting", "/discuss", "/збір", "/обговорення"}
@@ -78,10 +79,20 @@ def load_state() -> dict:
                 "topic": str(payload.get("topic", "Зустріч")),
                 "date": str(payload.get("date", "Не вказано")),
                 "place": str(payload.get("place", "Не вказано")),
-                "participants": {
-                    str(uid): str(name) for uid, name in payload.get("participants", {}).items()
-                },
+                "participants": {},
             }
+            participants = payload.get("participants", {})
+            for uid, data_item in participants.items():
+                if isinstance(data_item, dict):
+                    events_map[str(chat_id)]["participants"][str(uid)] = {
+                        "name": str(data_item.get("name", uid)),
+                        "time": str(data_item.get("time", "")),
+                    }
+                else:
+                    events_map[str(chat_id)]["participants"][str(uid)] = {
+                        "name": str(data_item),
+                        "time": "",
+                    }
         return {"processed_users": users, "awaiting_intro_users": awaiting, "events": events_map}
     except Exception:
         return {"processed_users": [], "awaiting_intro_users": [], "events": {}}
@@ -104,7 +115,13 @@ def save_state(state: dict) -> None:
             "date": str(event_data.get("date", "Не вказано")),
             "place": str(event_data.get("place", "Не вказано")),
             "participants": {
-                str(uid): str(name) for uid, name in event_data.get("participants", {}).items()
+                str(uid): {
+                    "name": str(data_item.get("name", uid))
+                    if isinstance(data_item, dict)
+                    else str(data_item),
+                    "time": str(data_item.get("time", "")) if isinstance(data_item, dict) else "",
+                }
+                for uid, data_item in event_data.get("participants", {}).items()
             },
         }
     STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
@@ -133,6 +150,15 @@ def normalize_vote(text: str):
     if normalized in YES_MARKERS or any(p in normalized for p in yes_phrases):
         return "yes"
     return None
+
+
+def extract_time_hint(text: str) -> str:
+    match = re.search(r"\b([01]?\d|2[0-3])[:.]([0-5]\d)\b", text)
+    if not match:
+        return ""
+    h = int(match.group(1))
+    m = match.group(2)
+    return f"{h:02d}:{m}"
 
 
 def split_command_and_args(text: str):
@@ -172,7 +198,7 @@ def parse_meeting_payload(args: str) -> dict:
             f"Дата: {date}\n"
             f"Місце: {place}\n\n"
             "Голосування: відповідайте реплаєм на це повідомлення\n"
-            "+ якщо будете\n"
+            "+ або + 19:00 якщо будете\n"
             "- якщо не будете"
         )
         return {"topic": topic, "date": date, "place": place, "text": text}
@@ -182,7 +208,7 @@ def parse_meeting_payload(args: str) -> dict:
         "Дата: Не вказано\n"
         "Місце: Не вказано\n\n"
         "Голосування: відповідайте реплаєм на це повідомлення\n"
-        "+ якщо будете\n"
+        "+ або + 19:00 якщо будете\n"
         "- якщо не будете"
     )
     return {"topic": args, "date": "Не вказано", "place": "Не вказано", "text": text}
@@ -204,10 +230,30 @@ def render_rsvp_summary(event_data: dict) -> str:
     participants = event_data.get("participants", {})
     if not participants:
         return "Хто приходить: 0\n\nПоки що ніхто не підтвердив участь."
-    names = [name for _, name in sorted(participants.items(), key=lambda item: item[1].lower())]
-    lines = [f"Хто приходить: {len(names)}", ""]
-    for idx, name in enumerate(names, start=1):
-        lines.append(f"{idx}. {name}")
+    rows = []
+    time_stats = {}
+    for _, data_item in sorted(
+        participants.items(), key=lambda item: str(item[1].get("name", "")).lower()
+    ):
+        name = str(data_item.get("name", ""))
+        time_hint = str(data_item.get("time", "")).strip()
+        rows.append((name, time_hint))
+        if time_hint:
+            time_stats[time_hint] = time_stats.get(time_hint, 0) + 1
+
+    lines = [f"Хто приходить: {len(rows)}", ""]
+    for idx, (name, time_hint) in enumerate(rows, start=1):
+        if time_hint:
+            lines.append(f"{idx}. {name} ({time_hint})")
+        else:
+            lines.append(f"{idx}. {name}")
+
+    if time_stats:
+        lines.append("")
+        lines.append("Часові пропозиції:")
+        for time_value, count in sorted(time_stats.items(), key=lambda x: (-x[1], x[0])):
+            lines.append(f"- {time_value}: {count}")
+
     return "\n".join(lines)
 
 
@@ -240,6 +286,7 @@ def build_help_text() -> str:
         "Показати цю довідку.\n\n"
         "Приклад:\n"
         "/meeting сьогодні | Аркадія, 2 майданчик | волейбол\n"
+        "У групі голоси: +, + 19:00, йду 19:30, -\n"
         "/close 19:30"
     )
 
@@ -427,7 +474,10 @@ async def handle_message(event):
                 participants = active_event.get("participants", {})
                 uid = str(user_id)
                 if vote == "yes":
-                    participants[uid] = user_display_name(sender)
+                    participants[uid] = {
+                        "name": user_display_name(sender),
+                        "time": extract_time_hint(text),
+                    }
                 else:
                     participants.pop(uid, None)
                 active_event["participants"] = participants
