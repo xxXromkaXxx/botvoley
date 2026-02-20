@@ -21,7 +21,6 @@ REPLY_TEXT = os.getenv(
 STATE_FILE = Path(os.getenv("STATE_FILE", "state.json"))
 PROCESS_ONCE = os.getenv("PROCESS_ONCE", "1").strip() == "1"
 TEST_USER_ID = int(os.getenv("TEST_USER_ID", "0"))
-OWNER_ONLY_ID = 1293715368
 
 MEETING_TEXT_FALLBACK = (
     "Ну що, збираємось?\n"
@@ -251,7 +250,6 @@ awaiting_intro_users = set(state["awaiting_intro_users"])
 events_state = state["events"]
 client = TelegramClient(StringSession(SESSION_STRING), API_ID, API_HASH)
 channel_entity = None
-self_user_id = 0
 
 
 @client.on(events.NewMessage())
@@ -268,63 +266,54 @@ async def handle_message(event):
     command, command_args = split_command_and_args(text)
     user_id = event.sender_id
 
-    # Private admin control from your own account.
-    if event.is_private and user_id == self_user_id and command:
-        if channel_entity is None:
-            await client.send_message(
-                event.chat_id,
-                "CHANNEL_ID недоступний для цієї сесії. Перевір доступ акаунта до групи/каналу.",
-            )
-            return
+    # Private admin control: any user who is admin in target channel/group can manage events from private chat.
+    if event.is_private and channel_entity is not None:
+        is_admin_in_target = await sender_is_admin(channel_entity, user_id)
+        if is_admin_in_target:
+            target_chat = channel_entity
+            target_chat_key = str(int(getattr(target_chat, "id", 0) or 0))
+            active_event = events_state.get(target_chat_key)
 
-        target_chat = channel_entity
-        target_chat_key = str(int(getattr(target_chat, "id", 0) or 0))
-        active_event = events_state.get(target_chat_key)
-
-        if command in ADMIN_MEETING_COMMANDS:
-            posted = await client.send_message(target_chat, build_meeting_text(command_args))
-            events_state[target_chat_key] = {
-                "message_id": int(posted.id),
-                "is_open": True,
-                "started_at_message_id": int(posted.id),
-                "participants": {},
-            }
-            state["events"] = events_state
-            save_state(state)
-            await client.send_message(event.chat_id, "Збір створено.")
-            return
-
-        if command in ADMIN_WHO_COMMANDS:
-            if active_event:
-                await client.send_message(event.chat_id, render_rsvp_summary(active_event))
-            else:
-                await client.send_message(event.chat_id, "Активного збору немає. Запусти /meeting")
-            return
-
-        if command in ADMIN_CLOSE_COMMANDS:
-            if active_event and active_event.get("is_open", True):
-                active_event["is_open"] = False
-                events_state[target_chat_key] = active_event
+            if command in ADMIN_MEETING_COMMANDS:
+                posted = await client.send_message(target_chat, build_meeting_text(command_args))
+                events_state[target_chat_key] = {
+                    "message_id": int(posted.id),
+                    "is_open": True,
+                    "started_at_message_id": int(posted.id),
+                    "participants": {},
+                }
                 state["events"] = events_state
                 save_state(state)
-                summary = render_rsvp_summary(active_event)
-                await client.send_message(target_chat, "Збір закрито.\n\n" + summary)
-                await client.send_message(event.chat_id, "Збір закрито.")
-            else:
-                await client.send_message(event.chat_id, "Активного збору немає. Запусти /meeting")
+                await client.send_message(event.chat_id, "Збір створено.")
+                return
+
+            if command in ADMIN_WHO_COMMANDS:
+                if active_event:
+                    await client.send_message(event.chat_id, render_rsvp_summary(active_event))
+                else:
+                    await client.send_message(event.chat_id, "Активного збору немає. Запусти /meeting")
+                return
+
+            if command in ADMIN_CLOSE_COMMANDS:
+                if active_event and active_event.get("is_open", True):
+                    active_event["is_open"] = False
+                    events_state[target_chat_key] = active_event
+                    state["events"] = events_state
+                    save_state(state)
+                    summary = render_rsvp_summary(active_event)
+                    await client.send_message(target_chat, "Збір закрито.\n\n" + summary)
+                    await client.send_message(event.chat_id, "Збір закрито.")
+                else:
+                    await client.send_message(event.chat_id, "Активного збору немає. Запусти /meeting")
+                return
+
+            if command in ADMIN_FINAL_COMMANDS:
+                await client.send_message(target_chat, FINAL_TEXT)
+                await client.send_message(event.chat_id, "Підсумок відправлено.")
+                return
+
+            # Admin private chats are command-only.
             return
-
-        if command in ADMIN_FINAL_COMMANDS:
-            await client.send_message(target_chat, FINAL_TEXT)
-            await client.send_message(event.chat_id, "Підсумок відправлено.")
-            return
-
-    if event.is_private and user_id == self_user_id:
-        return
-
-    # Owner-only mode for the main account: ignore private keyword flow from other users.
-    if self_user_id == OWNER_ONLY_ID and event.is_private and user_id != self_user_id:
-        return
 
     if event.is_group or event.is_channel:
         chat = await event.get_chat()
@@ -425,7 +414,7 @@ async def handle_message(event):
 
 
 async def main():
-    global channel_entity, self_user_id
+    global channel_entity
 
     print("Starting intro bot...", flush=True)
     await client.connect()
@@ -435,7 +424,6 @@ async def main():
     channel_entity = await resolve_channel_entity_safe()
 
     me = await client.get_me()
-    self_user_id = int(getattr(me, "id", 0) or 0)
     print(f"Started as {me.id}", flush=True)
     print(f"Keywords: {', '.join(KEYWORDS)}", flush=True)
     print(f"Channel ref: {CHANNEL_REF}", flush=True)
