@@ -1,78 +1,44 @@
-# telegram-intro-bot
+# telegram-intro-bot (GitHub Actions)
 
-Бот для user-акаунта (Telethon):
-- у лічці ловить ключові слова (`дайвінчик`, `волейбол`, ...),
-- відповідає шаблоном,
-- просить представитись,
-- після наступного повідомлення користувача пише лог у канал.
+Бот працює через GitHub Actions (кожні 5 хв), без Scalingo.
 
-## Локальний запуск
+## Що робить
 
-```bash
-cd "/Users/romka/Documents/New project/telegram-intro-bot"
-source ../.venv/bin/activate
-pip install -r requirements.txt
-set -a; source .env; set +a
-python -u bot.py
-```
+1. Якщо в лічку пишуть повідомлення з `KEYWORDS` (наприклад `дайвінчик`, `волейбол`) — бот відповідає:
+   `REPLY_TEXT`.
+2. Чекає наступне повідомлення цього користувача (представлення).
+3. Пише в канал:
+   - `До нас приєднався новий користувач: @username` (якщо є)
+   - `Його повідомлення: ...`
+4. Намагається додати користувача в канал.
 
-## Деплой на Scalingo
+## Файли
 
-Потрібні файли вже є:
-- `Procfile` (`worker: python -u bot.py`)
-- `requirements.txt`
+- `gh_poller.py` — опитування діалогів
+- `.github/workflows/intro-poller.yml` — запуск кожні 5 хв
+- `gh_state.json` — збережений стан (оновлюється автокомітом)
 
-### 1) Підготуй git
+## Налаштування GitHub
 
-```bash
-cd "/Users/romka/Documents/New project/telegram-intro-bot"
-git init
-git add .
-git commit -m "init telegram intro bot"
-```
+У репозиторії GitHub -> `Settings` -> `Secrets and variables` -> `Actions` додай:
 
-### 2) Створи app у Scalingo
-
-1. Відкрий [https://dashboard.scalingo.com](https://dashboard.scalingo.com)
-2. `Create an app`
-3. Runtime: `Python`
-4. Після створення скопіюй `Git remote URL` з вкладки Deploy.
-
-### 3) Задеплой код
-
-```bash
-cd "/Users/romka/Documents/New project/telegram-intro-bot"
-git remote add scalingo <GIT_REMOTE_URL_FROM_SCALINGO>
-git push scalingo main
-```
-
-Якщо локальна гілка не `main`, використовуй:
-```bash
-git push scalingo HEAD:main
-```
-
-### 4) Додай змінні оточення в Scalingo
-
-У `Environment` додай:
 - `API_ID`
 - `API_HASH`
 - `SESSION_STRING`
 - `CHANNEL_ID`
-- `KEYWORDS`
+- `KEYWORDS` (наприклад `дайвінчик,волейбол`)
 - `REPLY_TEXT`
-- `PROCESS_ONCE`
-- `TEST_USER_ID`
-- `STATE_FILE=state.json`
+- `PROCESS_ONCE` (`1` або `0`)
+- `TEST_USER_ID` (для безлімітних тестів)
 
-### 5) Увімкни worker
+## Запуск
 
-У вкладці `Resources` вистав:
-- `worker = 1`
-
-`web` процес не потрібен.
+1. Запуш цей проєкт у GitHub.
+2. У вкладці `Actions` відкрий `Intro Bot Poller`.
+3. Натисни `Run workflow`.
+4. Далі workflow запускається автоматично кожні 5 хв.
 
 ## Важливо
 
-- На Scalingo файлова система не гарантує довгострокове збереження стану після redeploy/restart.
-- Якщо `PROCESS_ONCE=1`, і потрібна стабільна пам'ять між перезапусками, краще зберігати стан у БД.
-- Якщо раніше світив `API_HASH` або `SESSION_STRING`, перевипусти їх.
+- Це не realtime: затримка до ~5 хв.
+- Якщо `API_HASH`/`SESSION_STRING` були десь публічно показані — перевипусти їх.
