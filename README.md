@@ -1,44 +1,55 @@
-# telegram-intro-bot (GitHub Actions)
+# telegram-intro-bot (Railway)
 
-Бот працює через GitHub Actions (кожні 5 хв), без Scalingo.
+Telegram-бот для приватних повідомлень:
 
-## Що робить
+1. Ловить ключові слова в лічці (`KEYWORDS`).
+2. Відповідає текстом (`REPLY_TEXT`).
+3. Чекає наступне повідомлення (представлення).
+4. Пише його в канал і пробує додати користувача в канал.
 
-1. Якщо в лічку пишуть повідомлення з `KEYWORDS` (наприклад `дайвінчик`, `волейбол`) — бот відповідає:
-   `REPLY_TEXT`.
-2. Чекає наступне повідомлення цього користувача (представлення).
-3. Пише в канал:
-   - `До нас приєднався новий користувач: @username` (якщо є)
-   - `Його повідомлення: ...`
-4. Намагається додати користувача в канал.
+## Що залишилось у проєкті
 
-## Файли
+- `bot.py` — основна логіка бота (довгий запуск для worker).
+- `requirements.txt` — залежності (тільки `telethon`).
+- `Dockerfile` — контейнерний запуск.
+- `Procfile` — команда для worker (`python -u bot.py`).
+- `gen_session.py` — згенерувати `SESSION_STRING`.
+- `get_ids.py` — допоміжний скрипт, щоб дістати ID.
 
-- `gh_poller.py` — опитування діалогів
-- `.github/workflows/intro-poller.yml` — запуск кожні 5 хв
-- `gh_state.json` — збережений стан (оновлюється автокомітом)
+## Railway: кроки запуску
 
-## Налаштування GitHub
+1. Запуш код у GitHub.
+2. Railway -> `New Project` -> `Deploy from GitHub repo` -> обери цей репозиторій.
+3. Після першого деплою відкрий сервіс -> `Variables` і задай:
+   - `API_ID`
+   - `API_HASH`
+   - `SESSION_STRING`
+   - `CHANNEL_ID` (наприклад `-1001234567890`)
+   - `KEYWORDS` (наприклад `дайвінчик,волейбол`)
+   - `REPLY_TEXT`
+   - `PROCESS_ONCE=1`
+   - `TEST_USER_ID=0`
+4. Дуже бажано зробити persistent volume:
+   - `Settings` -> `Volumes` -> `Add Volume`
+   - Mount path: `/data`
+   - додай змінну `STATE_FILE=/data/state.json`
+5. У `Settings` перевір `Start Command`:
+   - або залиш автоматично з `Procfile`
+   - або явно вкажи `python -u bot.py`
+6. Зроби `Redeploy`.
+7. Перевір логи: має бути `Starting intro bot...` і `Started as ...`.
 
-У репозиторії GitHub -> `Settings` -> `Secrets and variables` -> `Actions` додай:
+## Локальний запуск (опційно)
 
-- `API_ID`
-- `API_HASH`
-- `SESSION_STRING`
-- `CHANNEL_ID`
-- `KEYWORDS` (наприклад `дайвінчик,волейбол`)
-- `REPLY_TEXT`
-- `PROCESS_ONCE` (`1` або `0`)
-- `TEST_USER_ID` (для безлімітних тестів)
-
-## Запуск
-
-1. Запуш цей проєкт у GitHub.
-2. У вкладці `Actions` відкрий `Intro Bot Poller`.
-3. Натисни `Run workflow`.
-4. Далі workflow запускається автоматично кожні 5 хв.
+```bash
+python3 -m venv .venv
+source .venv/bin/activate
+pip install -r requirements.txt
+cp .env.example .env
+python -u bot.py
+```
 
 ## Важливо
 
-- Це не realtime: затримка до ~5 хв.
-- Якщо `API_HASH`/`SESSION_STRING` були десь публічно показані — перевипусти їх.
+- Якщо не підключити volume, `state.json` буде скидатися після redeploy/restart.
+- Якщо `API_HASH` або `SESSION_STRING` десь світилися публічно, перевипусти їх.
