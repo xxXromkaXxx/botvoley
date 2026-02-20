@@ -21,6 +21,7 @@ REPLY_TEXT = os.getenv(
 STATE_FILE = Path(os.getenv("STATE_FILE", "state.json"))
 PROCESS_ONCE = os.getenv("PROCESS_ONCE", "1").strip() == "1"
 TEST_USER_ID = int(os.getenv("TEST_USER_ID", "0"))
+OWNER_ONLY_ID = 1293715368
 
 MEETING_TEXT_FALLBACK = (
     "Ну що, збираємось?\n"
@@ -68,9 +69,11 @@ def load_state() -> dict:
         awaiting = [int(x) for x in data.get("awaiting_intro_users", [])]
         events_map = {}
         for chat_id, payload in data.get("events", {}).items():
+            msg_id = int(payload.get("message_id", 0))
             events_map[str(chat_id)] = {
-                "message_id": int(payload.get("message_id", 0)),
+                "message_id": msg_id,
                 "is_open": bool(payload.get("is_open", True)),
+                "started_at_message_id": int(payload.get("started_at_message_id", msg_id)),
                 "participants": {
                     str(uid): str(name) for uid, name in payload.get("participants", {}).items()
                 },
@@ -90,10 +93,14 @@ def save_state(state: dict) -> None:
         payload["events"][str(chat_id)] = {
             "message_id": int(event_data.get("message_id", 0)),
             "is_open": bool(event_data.get("is_open", True)),
+            "started_at_message_id": int(
+                event_data.get("started_at_message_id", event_data.get("message_id", 0))
+            ),
             "participants": {
                 str(uid): str(name) for uid, name in event_data.get("participants", {}).items()
             },
         }
+    STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
     STATE_FILE.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
@@ -197,13 +204,42 @@ async def sender_is_admin(chat, user_id: int) -> bool:
 
 async def resolve_channel_entity_safe():
     try:
-        await client.get_dialogs(limit=200)
+        dialogs = await client.get_dialogs(limit=200)
     except Exception:
-        pass
+        dialogs = []
 
     try:
         return await client.get_entity(CHANNEL_REF)
-    except Exception as e:
+    except Exception:
+        # Fallback: search in loaded dialogs by possible id formats.
+        try:
+            base = int(str(CHANNEL_ID_RAW).replace("-100", ""))
+            candidates = {base, -base, int(CHANNEL_ID_RAW)}
+        except Exception:
+            candidates = set()
+
+        for d in dialogs:
+            try:
+                did = int(getattr(d, "id", 0) or 0)
+                eid = int(getattr(d.entity, "id", 0) or 0)
+                if did in candidates or eid in candidates or -eid in candidates:
+                    return d.entity
+            except Exception:
+                continue
+
+        try:
+            async for d in client.iter_dialogs():
+                try:
+                    did = int(getattr(d, "id", 0) or 0)
+                    eid = int(getattr(d.entity, "id", 0) or 0)
+                    if did in candidates or eid in candidates or -eid in candidates:
+                        return d.entity
+                except Exception:
+                    continue
+        except Exception:
+            pass
+
+        e = "not found in dialogs"
         print(f"Warning: cannot resolve CHANNEL_ID={CHANNEL_ID_RAW}: {e}", flush=True)
         print("Bot will continue, but channel features are disabled.", flush=True)
         return None
@@ -284,6 +320,10 @@ async def handle_message(event):
             return
 
     if event.is_private and user_id == self_user_id:
+        return
+
+    # Owner-only mode for the main account: ignore private keyword flow from other users.
+    if self_user_id == OWNER_ONLY_ID and event.is_private and user_id != self_user_id:
         return
 
     if event.is_group or event.is_channel:
