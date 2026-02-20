@@ -23,11 +23,10 @@ PROCESS_ONCE = os.getenv("PROCESS_ONCE", "1").strip() == "1"
 TEST_USER_ID = int(os.getenv("TEST_USER_ID", "0"))
 
 MEETING_TEXT_FALLBACK = (
-    "Ну що, обговорюємо?\n"
-    "На яку годину збираємось?\n\n"
-    "Відповідайте РЕПЛАЄМ на це повідомлення:\n"
-    "+, +1, йду, я за, пирйду, я в темі, я буду = прийду\n"
-    "-, -1, не йду = не прийду"
+    "Ну що, збираємось?\n"
+    "Напишіть реплаєм на це повідомлення:\n"
+    "+ якщо будете\n"
+    "- якщо не будете"
 )
 FINAL_TEXT = (
     "Фіксуємо фінальне рішення:\n"
@@ -107,10 +106,18 @@ def normalize_vote(text: str):
         .replace("?", " ")
         .split()
     )
-    if normalized in YES_MARKERS:
-        return "yes"
-    if normalized in NO_MARKERS:
+    if normalized.startswith("-"):
         return "no"
+    if normalized.startswith("+"):
+        return "yes"
+
+    no_phrases = ["не йду", "не буду", "не зможу", "no"]
+    yes_phrases = ["йду", "прийду", "я за", "я в темі", "я буду", "yes", "ok"]
+
+    if normalized in NO_MARKERS or any(p in normalized for p in no_phrases):
+        return "no"
+    if normalized in YES_MARKERS or any(p in normalized for p in yes_phrases):
+        return "yes"
     return None
 
 
@@ -145,15 +152,15 @@ def build_meeting_text(args: str) -> str:
             f"Збір: {topic}\n"
             f"Дата: {date}\n"
             f"Місце: {place}\n\n"
-            "Відповідайте РЕПЛАЄМ на це повідомлення:\n"
-            "+, +1, йду, я за, пирйду, я в темі, я буду = прийду\n"
-            "-, -1, не йду = не прийду"
+            "Голосування: відповідайте реплаєм на це повідомлення\n"
+            "+ якщо будете\n"
+            "- якщо не будете"
         )
     return (
         f"Збір: {args}\n\n"
-        "Відповідайте РЕПЛАЄМ на це повідомлення:\n"
-        "+, +1, йду, я за, пирйду, я в темі, я буду = прийду\n"
-        "-, -1, не йду = не прийду"
+        "Голосування: відповідайте реплаєм на це повідомлення\n"
+        "+ якщо будете\n"
+        "- якщо не будете"
     )
 
 
@@ -208,11 +215,12 @@ awaiting_intro_users = set(state["awaiting_intro_users"])
 events_state = state["events"]
 client = TelegramClient(StringSession(SESSION_STRING), API_ID, API_HASH)
 channel_entity = None
+self_user_id = 0
 
 
-@client.on(events.NewMessage(incoming=True))
+@client.on(events.NewMessage())
 async def handle_message(event):
-    if event.out or not event.raw_text:
+    if not event.raw_text:
         return
 
     sender = await event.get_sender()
@@ -223,6 +231,59 @@ async def handle_message(event):
     text_lower = text.lower()
     command, command_args = split_command_and_args(text)
     user_id = event.sender_id
+
+    # Private admin control from your own account.
+    if event.is_private and user_id == self_user_id and command:
+        if channel_entity is None:
+            await client.send_message(
+                event.chat_id,
+                "CHANNEL_ID недоступний для цієї сесії. Перевір доступ акаунта до групи/каналу.",
+            )
+            return
+
+        target_chat = channel_entity
+        target_chat_key = str(int(getattr(target_chat, "id", 0) or 0))
+        active_event = events_state.get(target_chat_key)
+
+        if command in ADMIN_MEETING_COMMANDS:
+            posted = await client.send_message(target_chat, build_meeting_text(command_args))
+            events_state[target_chat_key] = {
+                "message_id": int(posted.id),
+                "is_open": True,
+                "participants": {},
+            }
+            state["events"] = events_state
+            save_state(state)
+            await client.send_message(event.chat_id, "Збір створено.")
+            return
+
+        if command in ADMIN_WHO_COMMANDS:
+            if active_event:
+                await client.send_message(event.chat_id, render_rsvp_summary(active_event))
+            else:
+                await client.send_message(event.chat_id, "Активного збору немає. Запусти /meeting")
+            return
+
+        if command in ADMIN_CLOSE_COMMANDS:
+            if active_event and active_event.get("is_open", True):
+                active_event["is_open"] = False
+                events_state[target_chat_key] = active_event
+                state["events"] = events_state
+                save_state(state)
+                summary = render_rsvp_summary(active_event)
+                await client.send_message(target_chat, "Збір закрито.\n\n" + summary)
+                await client.send_message(event.chat_id, "Збір закрито.")
+            else:
+                await client.send_message(event.chat_id, "Активного збору немає. Запусти /meeting")
+            return
+
+        if command in ADMIN_FINAL_COMMANDS:
+            await client.send_message(target_chat, FINAL_TEXT)
+            await client.send_message(event.chat_id, "Підсумок відправлено.")
+            return
+
+    if event.is_private and user_id == self_user_id:
+        return
 
     if event.is_group or event.is_channel:
         chat = await event.get_chat()
@@ -357,7 +418,7 @@ async def handle_message(event):
 
 
 async def main():
-    global channel_entity
+    global channel_entity, self_user_id
 
     print("Starting intro bot...", flush=True)
     await client.connect()
@@ -367,6 +428,7 @@ async def main():
     channel_entity = await resolve_channel_entity_safe()
 
     me = await client.get_me()
+    self_user_id = int(getattr(me, "id", 0) or 0)
     print(f"Started as {me.id}", flush=True)
     print(f"Keywords: {', '.join(KEYWORDS)}", flush=True)
     print(f"Channel ref: {CHANNEL_REF}", flush=True)
