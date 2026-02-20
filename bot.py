@@ -12,7 +12,7 @@ from telethon.tl.functions.channels import InviteToChannelRequest
 API_ID = int(os.getenv("API_ID", "0"))
 API_HASH = os.getenv("API_HASH", "")
 SESSION_STRING = os.getenv("SESSION_STRING", "")
-CHANNEL_ID_RAW = os.getenv("CHANNEL_ID", "")
+CHANNEL_ID_RAW = "-1003885190351"
 KEYWORDS_RAW = os.getenv("KEYWORDS", "дайвінчик,волейбол")
 REPLY_TEXT = os.getenv(
     "REPLY_TEXT",
