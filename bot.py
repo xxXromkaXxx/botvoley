@@ -250,6 +250,7 @@ async def handle_message(event):
             events_state[target_chat_key] = {
                 "message_id": int(posted.id),
                 "is_open": True,
+                "started_at_message_id": int(posted.id),
                 "participants": {},
             }
             state["events"] = events_state
@@ -288,79 +289,45 @@ async def handle_message(event):
     if event.is_group or event.is_channel:
         chat = await event.get_chat()
         chat_id = int(getattr(chat, "id", 0) or 0)
+        target_chat_id = int(getattr(channel_entity, "id", 0) or 0) if channel_entity is not None else 0
 
-        is_admin = await sender_is_admin(chat, user_id)
         chat_key = str(chat_id)
         active_event = events_state.get(chat_key)
 
-        if command in ADMIN_MEETING_COMMANDS:
-            if is_admin:
-                posted = await client.send_message(chat, build_meeting_text(command_args))
-                events_state[chat_key] = {
-                    "message_id": int(posted.id),
-                    "is_open": True,
-                    "participants": {},
-                }
-                state["events"] = events_state
-                save_state(state)
-                try:
-                    await event.delete()
-                except Exception:
-                    pass
+        # Commands in groups/channels are intentionally disabled.
+        if command in (
+            ADMIN_MEETING_COMMANDS
+            | ADMIN_FINAL_COMMANDS
+            | ADMIN_WHO_COMMANDS
+            | ADMIN_CLOSE_COMMANDS
+        ):
             return
 
-        if command in ADMIN_FINAL_COMMANDS:
-            if is_admin:
-                await client.send_message(chat, FINAL_TEXT)
-                try:
-                    await event.delete()
-                except Exception:
-                    pass
-            return
-
-        if command in ADMIN_WHO_COMMANDS:
-            if is_admin:
-                if active_event:
-                    await client.send_message(chat, render_rsvp_summary(active_event))
-                else:
-                    await client.send_message(chat, "Активного збору немає. Запусти /meeting")
-                try:
-                    await event.delete()
-                except Exception:
-                    pass
-            return
-
-        if command in ADMIN_CLOSE_COMMANDS:
-            if is_admin:
-                if active_event and active_event.get("is_open", True):
-                    active_event["is_open"] = False
-                    events_state[chat_key] = active_event
-                    state["events"] = events_state
-                    save_state(state)
-                    await client.send_message(chat, "Збір закрито.\n\n" + render_rsvp_summary(active_event))
-                else:
-                    await client.send_message(chat, "Активного збору немає. Запусти /meeting")
-                try:
-                    await event.delete()
-                except Exception:
-                    pass
+        if target_chat_id == 0 or chat_id != target_chat_id:
             return
 
         if active_event and active_event.get("is_open", True):
             reply_to_id = getattr(event.message, "reply_to_msg_id", None)
-            if reply_to_id and int(reply_to_id) == int(active_event.get("message_id", 0)):
-                vote = normalize_vote(text)
-                if vote:
-                    participants = active_event.get("participants", {})
-                    uid = str(user_id)
-                    if vote == "yes":
-                        participants[uid] = user_display_name(sender)
-                    else:
-                        participants.pop(uid, None)
-                    active_event["participants"] = participants
-                    events_state[chat_key] = active_event
-                    state["events"] = events_state
-                    save_state(state)
+            event_msg_id = int(active_event.get("message_id", 0))
+            started_at = int(active_event.get("started_at_message_id", event_msg_id))
+
+            # Count explicit replies to event post, and also short vote messages
+            # after event start in target chat.
+            is_reply_vote = bool(reply_to_id and int(reply_to_id) == event_msg_id)
+            is_after_start = int(getattr(event.message, "id", 0) or 0) >= started_at
+
+            vote = normalize_vote(text)
+            if vote and (is_reply_vote or is_after_start):
+                participants = active_event.get("participants", {})
+                uid = str(user_id)
+                if vote == "yes":
+                    participants[uid] = user_display_name(sender)
+                else:
+                    participants.pop(uid, None)
+                active_event["participants"] = participants
+                events_state[chat_key] = active_event
+                state["events"] = events_state
+                save_state(state)
         return
 
     if not event.is_private:
