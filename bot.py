@@ -16,44 +16,31 @@ CHANNEL_ID_RAW = os.getenv("CHANNEL_ID", "")
 KEYWORDS_RAW = os.getenv("KEYWORDS", "дайвінчик,волейбол")
 REPLY_TEXT = os.getenv(
     "REPLY_TEXT",
-    "Привіт, я Рома, я радий, що ти написав/ла, зараз додам тебе в чат, але спочатку скажи своє ім'я чи представся, будь ласка 🙂",
+    "Привіт, скажи своє ім'я чи представся, будь ласка 🙂",
 )
 STATE_FILE = Path(os.getenv("STATE_FILE", "state.json"))
 PROCESS_ONCE = os.getenv("PROCESS_ONCE", "1").strip() == "1"
 TEST_USER_ID = int(os.getenv("TEST_USER_ID", "0"))
 
-# Admin commands in the target channel.
-MEETING_PROMPT_TEXT = (
+MEETING_TEXT = (
     "Ну що, обговорюємо?\n"
     "На яку годину збираємось?\n\n"
-    "Варіанти:\n"
-    "1) 18:00\n"
-    "2) 19:00\n"
-    "3) 20:00\n\n"
-    "Напишіть номер або свій варіант у коментарях.\n\n"
-    "Щоб порахувати хто прийде: відповідайте РЕПЛАЄМ на це повідомлення:\n"
-    "+ або 'йду' = буду\n"
-    "- або 'не йду' = не буду"
+    "Відповідайте РЕПЛАЄМ на це повідомлення:\n"
+    "+, +1, йду, я за, пирйду, я в темі, я буду = прийду\n"
+    "-, -1, не йду = не прийду"
 )
-FINAL_DECISION_TEMPLATE_TEXT = (
+FINAL_TEXT = (
     "Фіксуємо фінальне рішення:\n"
     "День: ___\n"
     "Час: ___\n"
-    "Формат/місце: ___\n\n"
-    "Якщо є заперечення, напишіть у коментарях протягом 30 хв."
+    "Формат/місце: ___"
 )
-ADMIN_CHANNEL_COMMANDS = {
-    "/meeting": MEETING_PROMPT_TEXT,
-    "/discuss": MEETING_PROMPT_TEXT,
-    "/збір": MEETING_PROMPT_TEXT,
-    "/обговорення": MEETING_PROMPT_TEXT,
-    "/final": FINAL_DECISION_TEMPLATE_TEXT,
-    "/підсумок": FINAL_DECISION_TEMPLATE_TEXT,
-}
-ADMIN_SHOW_RSVP_COMMANDS = {"/who", "/rsvp", "/хто"}
-ADMIN_CLOSE_RSVP_COMMANDS = {"/close", "/закрити"}
-RSVP_YES_MARKERS = {"+", "+1", "йду", "буду", "прийду", "yes", "ok"}
-RSVP_NO_MARKERS = {"-", "-1", "не йду", "небуду", "не буду", "no"}
+ADMIN_MEETING_COMMANDS = {"/meeting", "/discuss", "/збір", "/обговорення"}
+ADMIN_WHO_COMMANDS = {"/who", "/rsvp", "/хто"}
+ADMIN_CLOSE_COMMANDS = {"/close", "/закрити"}
+ADMIN_FINAL_COMMANDS = {"/final", "/підсумок"}
+YES_MARKERS = {"+", "+1", "йду", "я за", "пирйду", "прийду", "я в темі", "я буду"}
+NO_MARKERS = {"-", "-1", "не йду"}
 
 if not all([API_ID, API_HASH, SESSION_STRING, CHANNEL_ID_RAW]):
     raise RuntimeError("Set API_ID, API_HASH, SESSION_STRING, CHANNEL_ID in env")
@@ -80,15 +67,16 @@ def load_state() -> dict:
         data = json.loads(STATE_FILE.read_text(encoding="utf-8"))
         users = [int(x) for x in data.get("processed_users", [])]
         awaiting = [int(x) for x in data.get("awaiting_intro_users", [])]
-        events = {}
+        events_map = {}
         for chat_id, payload in data.get("events", {}).items():
-            participants = payload.get("participants", {})
-            events[str(chat_id)] = {
+            events_map[str(chat_id)] = {
                 "message_id": int(payload.get("message_id", 0)),
-                "participants": {str(uid): str(name) for uid, name in participants.items()},
                 "is_open": bool(payload.get("is_open", True)),
+                "participants": {
+                    str(uid): str(name) for uid, name in payload.get("participants", {}).items()
+                },
             }
-        return {"processed_users": users, "awaiting_intro_users": awaiting, "events": events}
+        return {"processed_users": users, "awaiting_intro_users": awaiting, "events": events_map}
     except Exception:
         return {"processed_users": [], "awaiting_intro_users": [], "events": {}}
 
@@ -102,19 +90,26 @@ def save_state(state: dict) -> None:
     for chat_id, event_data in state.get("events", {}).items():
         payload["events"][str(chat_id)] = {
             "message_id": int(event_data.get("message_id", 0)),
+            "is_open": bool(event_data.get("is_open", True)),
             "participants": {
                 str(uid): str(name) for uid, name in event_data.get("participants", {}).items()
             },
-            "is_open": bool(event_data.get("is_open", True)),
         }
     STATE_FILE.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
-def normalize_vote(text_lower: str):
-    normalized = " ".join(text_lower.split())
-    if normalized in RSVP_YES_MARKERS:
+def normalize_vote(text: str):
+    normalized = " ".join(
+        text.lower()
+        .replace(",", " ")
+        .replace(".", " ")
+        .replace("!", " ")
+        .replace("?", " ")
+        .split()
+    )
+    if normalized in YES_MARKERS:
         return "yes"
-    if normalized in RSVP_NO_MARKERS:
+    if normalized in NO_MARKERS:
         return "no"
     return None
 
@@ -134,7 +129,7 @@ def user_display_name(sender) -> str:
 def render_rsvp_summary(event_data: dict) -> str:
     participants = event_data.get("participants", {})
     if not participants:
-        return "Поки що ніхто не підтвердив участь."
+        return "Хто приходить: 0\n\nПоки що ніхто не підтвердив участь."
     names = [name for _, name in sorted(participants.items(), key=lambda item: item[1].lower())]
     lines = [f"Хто приходить: {len(names)}", ""]
     for idx, name in enumerate(names, start=1):
@@ -148,6 +143,20 @@ async def sender_is_admin(chat, user_id: int) -> bool:
         return bool(getattr(perms, "is_creator", False) or getattr(perms, "is_admin", False))
     except Exception:
         return False
+
+
+async def resolve_channel_entity_safe():
+    try:
+        await client.get_dialogs(limit=200)
+    except Exception:
+        pass
+
+    try:
+        return await client.get_entity(CHANNEL_REF)
+    except Exception as e:
+        print(f"Warning: cannot resolve CHANNEL_ID={CHANNEL_ID_RAW}: {e}", flush=True)
+        print("Bot will continue, but channel features are disabled.", flush=True)
+        return None
 
 
 state = load_state()
@@ -174,35 +183,42 @@ async def handle_message(event):
 
     if event.is_channel and target_channel_id is not None:
         chat = await event.get_chat()
-        chat_id = str(getattr(chat, "id", ""))
-
-        if str(target_channel_id) != chat_id:
+        chat_id = int(getattr(chat, "id", 0) or 0)
+        if chat_id != int(target_channel_id):
             return
 
         is_admin = await sender_is_admin(chat, user_id)
-        active_event = events_state.get(chat_id)
+        chat_key = str(chat_id)
+        active_event = events_state.get(chat_key)
 
-        # Admin shortcuts: post prepared messages in target channel.
-        if text_lower in ADMIN_CHANNEL_COMMANDS:
+        if text_lower in ADMIN_MEETING_COMMANDS:
             if is_admin:
-                posted = await client.send_message(chat, ADMIN_CHANNEL_COMMANDS[text_lower])
-                if text_lower in {"/meeting", "/discuss", "/збір", "/обговорення"}:
-                    events_state[chat_id] = {
-                        "message_id": int(posted.id),
-                        "participants": {},
-                        "is_open": True,
-                    }
-                    state["events"] = events_state
-                    save_state(state)
+                posted = await client.send_message(chat, MEETING_TEXT)
+                events_state[chat_key] = {
+                    "message_id": int(posted.id),
+                    "is_open": True,
+                    "participants": {},
+                }
+                state["events"] = events_state
+                save_state(state)
                 try:
                     await event.delete()
                 except Exception:
                     pass
             return
 
-        if text_lower in ADMIN_SHOW_RSVP_COMMANDS:
+        if text_lower in ADMIN_FINAL_COMMANDS:
             if is_admin:
-                if active_event and active_event.get("is_open", True):
+                await client.send_message(chat, FINAL_TEXT)
+                try:
+                    await event.delete()
+                except Exception:
+                    pass
+            return
+
+        if text_lower in ADMIN_WHO_COMMANDS:
+            if is_admin:
+                if active_event:
                     await client.send_message(chat, render_rsvp_summary(active_event))
                 else:
                     await client.send_message(chat, "Активного збору немає. Запусти /meeting")
@@ -212,11 +228,11 @@ async def handle_message(event):
                     pass
             return
 
-        if text_lower in ADMIN_CLOSE_RSVP_COMMANDS:
+        if text_lower in ADMIN_CLOSE_COMMANDS:
             if is_admin:
                 if active_event and active_event.get("is_open", True):
                     active_event["is_open"] = False
-                    events_state[chat_id] = active_event
+                    events_state[chat_key] = active_event
                     state["events"] = events_state
                     save_state(state)
                     await client.send_message(chat, "Збір закрито.\n\n" + render_rsvp_summary(active_event))
@@ -228,11 +244,10 @@ async def handle_message(event):
                     pass
             return
 
-        # RSVP replies from users to active meeting post.
         if active_event and active_event.get("is_open", True):
             reply_to_id = getattr(event.message, "reply_to_msg_id", None)
             if reply_to_id and int(reply_to_id) == int(active_event.get("message_id", 0)):
-                vote = normalize_vote(text_lower)
+                vote = normalize_vote(text)
                 if vote:
                     participants = active_event.get("participants", {})
                     uid = str(user_id)
@@ -241,7 +256,7 @@ async def handle_message(event):
                     else:
                         participants.pop(uid, None)
                     active_event["participants"] = participants
-                    events_state[chat_id] = active_event
+                    events_state[chat_key] = active_event
                     state["events"] = events_state
                     save_state(state)
         return
@@ -251,24 +266,28 @@ async def handle_message(event):
 
     username = getattr(sender, "username", None)
 
-    # Step 2: user already asked to introduce themselves; now take this message as intro.
     if user_id in awaiting_intro_users:
         print(f"Intro received from {user_id}: {text[:80]}", flush=True)
 
-        try:
-            await client(InviteToChannelRequest(channel=channel_entity, users=[user_id]))
-        except Exception:
-            pass
+        if channel_entity is not None:
+            try:
+                await client(InviteToChannelRequest(channel=channel_entity, users=[user_id]))
+            except Exception:
+                pass
 
-        if username:
-            log_text = (
-                f"До нас приєднався новий користувач: @{html.escape(username)}\n"
-                f"Його повідомлення: {html.escape(text)}"
-            )
-        else:
-            log_text = f"До нас приєднався новий користувач.\nЙого повідомлення: {html.escape(text)}"
+            if username:
+                log_text = (
+                    f"До нас приєднався новий користувач: @{html.escape(username)}\\n"
+                    f"Його повідомлення: {html.escape(text)}"
+                )
+            else:
+                log_text = f"До нас приєднався новий користувач.\\nЙого повідомлення: {html.escape(text)}"
 
-        await client.send_message(channel_entity, log_text)
+            try:
+                await client.send_message(channel_entity, log_text)
+            except Exception as e:
+                print(f"Warning: cannot send intro to channel: {e}", flush=True)
+
         await client(UpdateStatusRequest(offline=True))
 
         awaiting_intro_users.discard(user_id)
@@ -290,6 +309,7 @@ async def handle_message(event):
     await client(UpdateStatusRequest(offline=False))
     await client.send_message(event.chat_id, REPLY_TEXT)
     await client(UpdateStatusRequest(offline=True))
+
     awaiting_intro_users.add(user_id)
     state["awaiting_intro_users"] = sorted(awaiting_intro_users)
     save_state(state)
@@ -303,18 +323,15 @@ async def main():
     if not await client.is_user_authorized():
         raise RuntimeError("Session is not authorized. Regenerate SESSION_STRING.")
 
-    channel_entity = await client.get_entity(CHANNEL_REF)
-    target_channel_id = getattr(channel_entity, "id", None)
+    channel_entity = await resolve_channel_entity_safe()
+    target_channel_id = int(getattr(channel_entity, "id", 0) or 0) if channel_entity else None
 
     me = await client.get_me()
     print(f"Started as {me.id}", flush=True)
     print(f"Keywords: {', '.join(KEYWORDS)}", flush=True)
     print(f"Channel ref: {CHANNEL_REF}", flush=True)
     print(f"Process once: {PROCESS_ONCE}", flush=True)
-    all_admin_commands = sorted(
-        set(ADMIN_CHANNEL_COMMANDS) | ADMIN_SHOW_RSVP_COMMANDS | ADMIN_CLOSE_RSVP_COMMANDS
-    )
-    print(f"Admin discussion commands: {', '.join(all_admin_commands)}", flush=True)
+
     await client(UpdateStatusRequest(offline=True))
     await client.run_until_disconnected()
 
