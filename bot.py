@@ -490,6 +490,9 @@ async def handle_message(event):
         return
 
     username = getattr(sender, "username", None)
+    is_admin_in_target = False
+    if channel_entity is not None:
+        is_admin_in_target = await sender_is_admin(channel_entity, user_id)
 
     if user_id in awaiting_intro_users:
         print(f"Intro received from {user_id}: {text[:80]}", flush=True)
@@ -517,7 +520,7 @@ async def handle_message(event):
 
         awaiting_intro_users.discard(user_id)
         state["awaiting_intro_users"] = sorted(awaiting_intro_users)
-        if PROCESS_ONCE and user_id != TEST_USER_ID:
+        if user_id != TEST_USER_ID and (PROCESS_ONCE or not is_admin_in_target):
             processed_users.add(user_id)
             state["processed_users"] = sorted(processed_users)
         save_state(state)
@@ -526,7 +529,11 @@ async def handle_message(event):
     if not any(keyword in text_lower for keyword in KEYWORDS):
         return
 
-    if PROCESS_ONCE and user_id in processed_users and user_id != TEST_USER_ID:
+    should_limit_by_default = not is_admin_in_target
+    should_limit_by_config = PROCESS_ONCE and is_admin_in_target
+    should_limit = should_limit_by_default or should_limit_by_config
+
+    if should_limit and user_id in processed_users and user_id != TEST_USER_ID:
         print(f"Skip user {user_id}: already processed", flush=True)
         return
 
@@ -534,6 +541,11 @@ async def handle_message(event):
     await client(UpdateStatusRequest(offline=False))
     await client.send_message(event.chat_id, REPLY_TEXT)
     await client(UpdateStatusRequest(offline=True))
+
+    # For non-admins we always lock after first trigger; admins follow PROCESS_ONCE.
+    if user_id != TEST_USER_ID and should_limit:
+        processed_users.add(user_id)
+        state["processed_users"] = sorted(processed_users)
 
     awaiting_intro_users.add(user_id)
     state["awaiting_intro_users"] = sorted(awaiting_intro_users)
