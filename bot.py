@@ -6,6 +6,7 @@ import re
 from pathlib import Path
 
 from telethon import TelegramClient, events
+from telethon.errors import UserNotParticipantError
 from telethon.sessions import StringSession
 from telethon.tl.functions.account import UpdateStatusRequest
 from telethon.tl.functions.channels import InviteToChannelRequest
@@ -13,15 +14,17 @@ from telethon.tl.functions.channels import InviteToChannelRequest
 API_ID = int(os.getenv("API_ID", "0"))
 API_HASH = os.getenv("API_HASH", "")
 SESSION_STRING = os.getenv("SESSION_STRING", "")
+# Hardcoded target chat per current project setup.
 CHANNEL_ID_RAW = "-1003885190351"
 KEYWORDS_RAW = os.getenv("KEYWORDS", "дайвінчик,волейбол")
 REPLY_TEXT = os.getenv(
     "REPLY_TEXT",
-    "Привіт, скажи своє ім'я чи представся, будь ласка 🙂",
+    "Привіт, я Рома, радий, що ти написав/ла, зараз додам тебе в чат, але спочатку скажи своє ім'я чи представся, будь ласка :)",
 )
 STATE_FILE = Path(os.getenv("STATE_FILE", "state.json"))
 PROCESS_ONCE = os.getenv("PROCESS_ONCE", "1").strip() == "1"
 TEST_USER_ID = int(os.getenv("TEST_USER_ID", "0"))
+DAIVINCHIK_CHAT_ID = int(os.getenv("DAIVINCHIK_CHAT_ID", "0"))
 
 MEETING_TEXT_FALLBACK = (
     "Ну що, збираємось?\n"
@@ -42,7 +45,18 @@ ALL_ADMIN_COMMANDS = (
     | ADMIN_HELP_COMMANDS
 )
 YES_MARKERS = {"+", "+1", "йду", "я за", "пирйду", "прийду", "я в темі", "я буду"}
-NO_MARKERS = {"-", "-1", "не йду"}
+NO_MARKERS = {"-", "-1", "не йду", "не буду"}
+
+DAIVINCHIK_LIKES_RE = re.compile(r"Ти сподобався\s*(\d+)\s*дівчинам, показати їх\?", re.IGNORECASE)
+DAIVINCHIK_PROFILE_LIKED_TEXT = "Комусь сподобалась твоя анкета"
+DAIVINCHIK_START_CHAT_TEXT = "Починай спілкуватися"
+USERNAME_RE = re.compile(r"@([A-Za-z0-9_]{4,})")
+OUTREACH_TEXT = (
+    "Це я з дайвінчика .\n"
+    "Вітаю! Збираємо нову компанію для спорту та активного дозвілля. "
+    "Зараз плануємо волейбол і шукаємо нових людей у команду. "
+    "Будемо раді бачити тебе 🙂"
+)
 
 if not all([API_ID, API_HASH, SESSION_STRING, CHANNEL_ID_RAW]):
     raise RuntimeError("Set API_ID, API_HASH, SESSION_STRING, CHANNEL_ID in env")
@@ -64,15 +78,22 @@ CHANNEL_REF = parse_channel_ref(CHANNEL_ID_RAW)
 
 def load_state() -> dict:
     if not STATE_FILE.exists():
-        return {"processed_users": [], "awaiting_intro_users": [], "events": {}}
+        return {
+            "processed_users": [],
+            "awaiting_intro_users": [],
+            "events": {},
+            "contacted_usernames": [],
+        }
     try:
         data = json.loads(STATE_FILE.read_text(encoding="utf-8"))
         users = [int(x) for x in data.get("processed_users", [])]
         awaiting = [int(x) for x in data.get("awaiting_intro_users", [])]
+        contacted = [str(x).lower() for x in data.get("contacted_usernames", [])]
+
         events_map = {}
         for chat_id, payload in data.get("events", {}).items():
             msg_id = int(payload.get("message_id", 0))
-            events_map[str(chat_id)] = {
+            event_item = {
                 "message_id": msg_id,
                 "is_open": bool(payload.get("is_open", True)),
                 "started_at_message_id": int(payload.get("started_at_message_id", msg_id)),
@@ -81,21 +102,35 @@ def load_state() -> dict:
                 "place": str(payload.get("place", "Не вказано")),
                 "participants": {},
             }
+
             participants = payload.get("participants", {})
             for uid, data_item in participants.items():
                 if isinstance(data_item, dict):
-                    events_map[str(chat_id)]["participants"][str(uid)] = {
+                    event_item["participants"][str(uid)] = {
                         "name": str(data_item.get("name", uid)),
                         "time": str(data_item.get("time", "")),
                     }
                 else:
-                    events_map[str(chat_id)]["participants"][str(uid)] = {
+                    event_item["participants"][str(uid)] = {
                         "name": str(data_item),
                         "time": "",
                     }
-        return {"processed_users": users, "awaiting_intro_users": awaiting, "events": events_map}
+
+            events_map[str(chat_id)] = event_item
+
+        return {
+            "processed_users": users,
+            "awaiting_intro_users": awaiting,
+            "events": events_map,
+            "contacted_usernames": contacted,
+        }
     except Exception:
-        return {"processed_users": [], "awaiting_intro_users": [], "events": {}}
+        return {
+            "processed_users": [],
+            "awaiting_intro_users": [],
+            "events": {},
+            "contacted_usernames": [],
+        }
 
 
 def save_state(state: dict) -> None:
@@ -103,7 +138,9 @@ def save_state(state: dict) -> None:
         "processed_users": sorted(int(x) for x in state.get("processed_users", [])),
         "awaiting_intro_users": sorted(int(x) for x in state.get("awaiting_intro_users", [])),
         "events": {},
+        "contacted_usernames": sorted(set(str(x).lower() for x in state.get("contacted_usernames", []))),
     }
+
     for chat_id, event_data in state.get("events", {}).items():
         payload["events"][str(chat_id)] = {
             "message_id": int(event_data.get("message_id", 0)),
@@ -116,14 +153,13 @@ def save_state(state: dict) -> None:
             "place": str(event_data.get("place", "Не вказано")),
             "participants": {
                 str(uid): {
-                    "name": str(data_item.get("name", uid))
-                    if isinstance(data_item, dict)
-                    else str(data_item),
+                    "name": str(data_item.get("name", uid)) if isinstance(data_item, dict) else str(data_item),
                     "time": str(data_item.get("time", "")) if isinstance(data_item, dict) else "",
                 }
                 for uid, data_item in event_data.get("participants", {}).items()
             },
         }
+
     STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
     STATE_FILE.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
 
@@ -137,6 +173,7 @@ def normalize_vote(text: str):
         .replace("?", " ")
         .split()
     )
+
     if normalized.startswith("-"):
         return "no"
     if normalized.startswith("+"):
@@ -188,6 +225,7 @@ def parse_meeting_payload(args: str) -> dict:
             "place": "Не вказано",
             "text": MEETING_TEXT_FALLBACK,
         }
+
     parts = [p.strip() for p in args.split("|")]
     if len(parts) >= 3:
         date = normalize_meeting_date(parts[0])
@@ -230,6 +268,7 @@ def render_rsvp_summary(event_data: dict) -> str:
     participants = event_data.get("participants", {})
     if not participants:
         return "Хто приходить: 0\n\nПоки що ніхто не підтвердив участь."
+
     rows = []
     time_stats = {}
     for _, data_item in sorted(
@@ -299,6 +338,18 @@ async def sender_is_admin(chat, user_id: int) -> bool:
         return False
 
 
+async def user_is_member_of_target_chat(user_id: int) -> bool:
+    if channel_entity is None:
+        return False
+    try:
+        await client.get_permissions(channel_entity, user_id)
+        return True
+    except UserNotParticipantError:
+        return False
+    except Exception:
+        return False
+
+
 async def resolve_channel_entity_safe():
     try:
         dialogs = await client.get_dialogs(limit=200)
@@ -336,8 +387,7 @@ async def resolve_channel_entity_safe():
         except Exception:
             pass
 
-        e = "not found in dialogs"
-        print(f"Warning: cannot resolve CHANNEL_ID={CHANNEL_ID_RAW}: {e}", flush=True)
+        print(f"Warning: cannot resolve CHANNEL_ID={CHANNEL_ID_RAW}: not found in dialogs", flush=True)
         print("Bot will continue, but channel features are disabled.", flush=True)
         return None
 
@@ -346,6 +396,7 @@ state = load_state()
 processed_users = set(state["processed_users"])
 awaiting_intro_users = set(state["awaiting_intro_users"])
 events_state = state["events"]
+contacted_usernames = set(state.get("contacted_usernames", []))
 client = TelegramClient(StringSession(SESSION_STRING), API_ID, API_HASH)
 channel_entity = None
 
@@ -356,15 +407,48 @@ async def handle_message(event):
         return
 
     sender = await event.get_sender()
-    if getattr(sender, "bot", False):
-        return
-
     text = event.raw_text.strip()
     text_lower = text.lower()
     command, command_args = split_command_and_args(text)
-    user_id = event.sender_id
+    user_id = int(event.sender_id or 0)
 
-    # Private admin control: any user who is admin in target channel/group can manage events from private chat.
+    # Auto-flow for Daivinchik-like bot messages.
+    if event.is_private and getattr(sender, "bot", False):
+        if DAIVINCHIK_CHAT_ID and int(event.chat_id or 0) != DAIVINCHIK_CHAT_ID:
+            return
+
+        likes_match = DAIVINCHIK_LIKES_RE.search(text)
+        if likes_match:
+            likes_count = int(likes_match.group(1))
+            if likes_count > 0:
+                await client.send_message(event.chat_id, "1 👍")
+            return
+
+        if DAIVINCHIK_PROFILE_LIKED_TEXT.lower() in text_lower:
+            await client.send_message(event.chat_id, "❤️")
+            return
+
+        if DAIVINCHIK_START_CHAT_TEXT.lower() in text_lower:
+            username_match = USERNAME_RE.search(text)
+            if username_match:
+                username = username_match.group(1).lower()
+                if username not in contacted_usernames:
+                    try:
+                        await client.send_message(f"@{username}", OUTREACH_TEXT)
+                        contacted_usernames.add(username)
+                        state["contacted_usernames"] = sorted(contacted_usernames)
+                        save_state(state)
+                    except Exception as e:
+                        print(f"Warning: cannot outreach @{username}: {e}", flush=True)
+            return
+
+        # Ignore other bot messages.
+        return
+
+    if getattr(sender, "bot", False):
+        return
+
+    # Private admin control: commands from private chat only.
     if event.is_private and command in ALL_ADMIN_COMMANDS:
         if command in ADMIN_HELP_COMMANDS:
             await client.send_message(event.chat_id, build_help_text())
@@ -413,7 +497,7 @@ async def handle_message(event):
                 await client.send_message(event.chat_id, "Активного збору немає. Запусти /meeting")
             return
 
-        if command in ADMIN_CLOSE_COMMANDS:
+        if command in ADMIN_CLOSE_COMMANDS or command in ADMIN_FINAL_COMMANDS:
             if active_event and active_event.get("is_open", True):
                 active_event["is_open"] = False
                 events_state[target_chat_key] = active_event
@@ -426,19 +510,7 @@ async def handle_message(event):
                 await client.send_message(event.chat_id, "Активного збору немає. Запусти /meeting")
             return
 
-        if command in ADMIN_FINAL_COMMANDS:
-            if active_event and active_event.get("is_open", True):
-                active_event["is_open"] = False
-                events_state[target_chat_key] = active_event
-                state["events"] = events_state
-                save_state(state)
-                final_post = render_final_event_text(active_event, command_args)
-                await client.send_message(target_chat, "Збір закрито.\n\n" + final_post)
-                await client.send_message(event.chat_id, "Фінал відправлено, збір закрито.")
-            else:
-                await client.send_message(event.chat_id, "Активного збору немає. Запусти /meeting")
-            return
-
+    # Group/channel listener for RSVP only (commands disabled there).
     if event.is_group or event.is_channel:
         chat = await event.get_chat()
         chat_id = int(getattr(chat, "id", 0) or 0)
@@ -447,13 +519,7 @@ async def handle_message(event):
         chat_key = str(chat_id)
         active_event = events_state.get(chat_key)
 
-        # Commands in groups/channels are intentionally disabled.
-        if command in (
-            ADMIN_MEETING_COMMANDS
-            | ADMIN_FINAL_COMMANDS
-            | ADMIN_WHO_COMMANDS
-            | ADMIN_CLOSE_COMMANDS
-        ):
+        if command in (ADMIN_MEETING_COMMANDS | ADMIN_FINAL_COMMANDS | ADMIN_WHO_COMMANDS | ADMIN_CLOSE_COMMANDS):
             return
 
         if target_chat_id == 0 or chat_id != target_chat_id:
@@ -464,8 +530,6 @@ async def handle_message(event):
             event_msg_id = int(active_event.get("message_id", 0))
             started_at = int(active_event.get("started_at_message_id", event_msg_id))
 
-            # Count explicit replies to event post, and also short vote messages
-            # after event start in target chat.
             is_reply_vote = bool(reply_to_id and int(reply_to_id) == event_msg_id)
             is_after_start = int(getattr(event.message, "id", 0) or 0) >= started_at
 
@@ -489,38 +553,45 @@ async def handle_message(event):
     if not event.is_private:
         return
 
-    username = getattr(sender, "username", None)
     is_admin_in_target = False
     if channel_entity is not None:
         is_admin_in_target = await sender_is_admin(channel_entity, user_id)
+
+    # Admin accounts in private chat are command-only: no keyword auto-replies.
+    if is_admin_in_target:
+        return
+
+    username = getattr(sender, "username", None)
 
     if user_id in awaiting_intro_users:
         print(f"Intro received from {user_id}: {text[:80]}", flush=True)
 
         if channel_entity is not None:
-            try:
-                await client(InviteToChannelRequest(channel=channel_entity, users=[user_id]))
-            except Exception:
-                pass
+            already_member = await user_is_member_of_target_chat(user_id)
+            if not already_member:
+                try:
+                    await client(InviteToChannelRequest(channel=channel_entity, users=[user_id]))
+                except Exception:
+                    pass
 
-            if username:
-                log_text = (
-                    f"До нас приєднався новий користувач: @{html.escape(username)}\\n"
-                    f"Його повідомлення: {html.escape(text)}"
-                )
-            else:
-                log_text = f"До нас приєднався новий користувач.\\nЙого повідомлення: {html.escape(text)}"
+                if username:
+                    log_text = (
+                        f"До нас приєднався новий користувач: @{html.escape(username)}\\n"
+                        f"Його повідомлення: {html.escape(text)}"
+                    )
+                else:
+                    log_text = f"До нас приєднався новий користувач.\\nЙого повідомлення: {html.escape(text)}"
 
-            try:
-                await client.send_message(channel_entity, log_text)
-            except Exception as e:
-                print(f"Warning: cannot send intro to channel: {e}", flush=True)
+                try:
+                    await client.send_message(channel_entity, log_text)
+                except Exception as e:
+                    print(f"Warning: cannot send intro to channel: {e}", flush=True)
 
         await client(UpdateStatusRequest(offline=True))
 
         awaiting_intro_users.discard(user_id)
         state["awaiting_intro_users"] = sorted(awaiting_intro_users)
-        if user_id != TEST_USER_ID and (PROCESS_ONCE or not is_admin_in_target):
+        if user_id != TEST_USER_ID:
             processed_users.add(user_id)
             state["processed_users"] = sorted(processed_users)
         save_state(state)
@@ -529,11 +600,7 @@ async def handle_message(event):
     if not any(keyword in text_lower for keyword in KEYWORDS):
         return
 
-    should_limit_by_default = not is_admin_in_target
-    should_limit_by_config = PROCESS_ONCE and is_admin_in_target
-    should_limit = should_limit_by_default or should_limit_by_config
-
-    if should_limit and user_id in processed_users and user_id != TEST_USER_ID:
+    if user_id in processed_users and user_id != TEST_USER_ID:
         print(f"Skip user {user_id}: already processed", flush=True)
         return
 
@@ -542,8 +609,8 @@ async def handle_message(event):
     await client.send_message(event.chat_id, REPLY_TEXT)
     await client(UpdateStatusRequest(offline=True))
 
-    # For non-admins we always lock after first trigger; admins follow PROCESS_ONCE.
-    if user_id != TEST_USER_ID and should_limit:
+    # Non-admin users: one-time trigger lock immediately.
+    if user_id != TEST_USER_ID:
         processed_users.add(user_id)
         state["processed_users"] = sorted(processed_users)
 
