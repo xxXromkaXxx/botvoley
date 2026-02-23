@@ -88,6 +88,7 @@ def load_state() -> dict:
         return {
             "processed_users": [],
             "awaiting_intro_users": [],
+            "intro_name_tries": {},
             "events": {},
             "contacted_usernames": [],
             "last_manual_daiv_ts": 0,
@@ -96,6 +97,7 @@ def load_state() -> dict:
         data = json.loads(STATE_FILE.read_text(encoding="utf-8"))
         users = [int(x) for x in data.get("processed_users", [])]
         awaiting = [int(x) for x in data.get("awaiting_intro_users", [])]
+        intro_name_tries = {str(k): int(v) for k, v in data.get("intro_name_tries", {}).items()}
         contacted = [str(x).lower() for x in data.get("contacted_usernames", [])]
 
         events_map = {}
@@ -129,6 +131,7 @@ def load_state() -> dict:
         return {
             "processed_users": users,
             "awaiting_intro_users": awaiting,
+            "intro_name_tries": intro_name_tries,
             "events": events_map,
             "contacted_usernames": contacted,
             "last_manual_daiv_ts": int(data.get("last_manual_daiv_ts", 0) or 0),
@@ -137,6 +140,7 @@ def load_state() -> dict:
         return {
             "processed_users": [],
             "awaiting_intro_users": [],
+            "intro_name_tries": {},
             "events": {},
             "contacted_usernames": [],
             "last_manual_daiv_ts": 0,
@@ -147,6 +151,9 @@ def save_state(state: dict) -> None:
     payload = {
         "processed_users": sorted(int(x) for x in state.get("processed_users", [])),
         "awaiting_intro_users": sorted(int(x) for x in state.get("awaiting_intro_users", [])),
+        "intro_name_tries": {
+            str(k): int(v) for k, v in state.get("intro_name_tries", {}).items()
+        },
         "events": {},
         "contacted_usernames": sorted(set(str(x).lower() for x in state.get("contacted_usernames", []))),
         "last_manual_daiv_ts": int(state.get("last_manual_daiv_ts", 0) or 0),
@@ -198,6 +205,68 @@ def normalize_vote(text: str):
     if normalized in YES_MARKERS or any(p in normalized for p in yes_phrases):
         return "yes"
     return None
+
+
+def is_valid_intro_name(text: str) -> bool:
+    cleaned = " ".join(text.strip().split())
+    if not cleaned:
+        return False
+    if len(cleaned) < 4:
+        return False
+    if len(cleaned) > 220:
+        return False
+    if "?" in cleaned:
+        return False
+    if any(x in cleaned.lower() for x in ["http://", "https://", "@", "#"]):
+        return False
+
+    parts = re.findall(r"[A-Za-zА-Яа-яІіЇїЄєҐґ'’-]+", cleaned.lower())
+    if len(parts) < 1:
+        return False
+
+    # Reject question-like / support-like content.
+    bad_tokens = {
+        "коли",
+        "де",
+        "чому",
+        "як",
+        "питання",
+        "допоможіть",
+        "допоможи",
+        "можна",
+        "підкажіть",
+        "підкажи",
+    }
+    if any(p in bad_tokens for p in parts):
+        return False
+
+    # Accept if message looks like a self-introduction.
+    intro_markers = {
+        "я",
+        "мене",
+        "звуть",
+        "звати",
+        "мій",
+        "i",
+        "im",
+        "i'm",
+        "my",
+        "name",
+    }
+    if any(p in intro_markers for p in parts):
+        return True
+
+    # Accept one-word name-like input (e.g. "Іван", "Oleh").
+    if len(parts) == 1:
+        p = parts[0]
+        if 2 <= len(p) <= 24 and p not in bad_tokens:
+            return True
+
+    # Fallback: 2-6 word human-like text without question markers.
+    if 2 <= len(parts) <= 6:
+        return True
+
+    return False
 
 
 def extract_time_hint(text: str) -> str:
@@ -486,6 +555,7 @@ async def daiv_auto_worker():
 state = load_state()
 processed_users = set(state["processed_users"])
 awaiting_intro_users = set(state["awaiting_intro_users"])
+intro_name_tries = state.get("intro_name_tries", {})
 events_state = state["events"]
 contacted_usernames = set(state.get("contacted_usernames", []))
 client = TelegramClient(StringSession(SESSION_STRING), API_ID, API_HASH)
@@ -706,6 +776,24 @@ async def handle_message(event):
 
     if user_id in awaiting_intro_users:
         print(f"Intro received from {user_id}: {text[:80]}", flush=True)
+        user_key = str(user_id)
+
+        if not is_valid_intro_name(text):
+            tries = int(intro_name_tries.get(user_key, 0)) + 1
+            intro_name_tries[user_key] = tries
+            state["intro_name_tries"] = intro_name_tries
+            save_state(state)
+            if tries >= 2:
+                await client.send_message(
+                    event.chat_id,
+                    "Щоб додати в групу, напиши коротке представлення: як тебе звати і 1-2 речення про себе, без питань.",
+                )
+            else:
+                await client.send_message(
+                    event.chat_id,
+                    "Напиши, будь ласка, коротке представлення: ім'я + кілька слів про себе.",
+                )
+            return
 
         if channel_entity is not None:
             already_member = await user_is_member_of_target_chat(user_id)
@@ -731,7 +819,9 @@ async def handle_message(event):
         await client(UpdateStatusRequest(offline=True))
 
         awaiting_intro_users.discard(user_id)
+        intro_name_tries.pop(user_key, None)
         state["awaiting_intro_users"] = sorted(awaiting_intro_users)
+        state["intro_name_tries"] = intro_name_tries
         if user_id != TEST_USER_ID:
             processed_users.add(user_id)
             state["processed_users"] = sorted(processed_users)
@@ -756,7 +846,9 @@ async def handle_message(event):
         state["processed_users"] = sorted(processed_users)
 
     awaiting_intro_users.add(user_id)
+    intro_name_tries[str(user_id)] = 0
     state["awaiting_intro_users"] = sorted(awaiting_intro_users)
+    state["intro_name_tries"] = intro_name_tries
     save_state(state)
 
 
