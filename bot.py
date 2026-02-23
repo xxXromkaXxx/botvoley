@@ -350,6 +350,25 @@ async def user_is_member_of_target_chat(user_id: int) -> bool:
         return False
 
 
+async def invite_username_to_target_chat(username: str):
+    if channel_entity is None:
+        return False, "no_target_chat"
+    try:
+        user_entity = await client.get_entity(f"@{username}")
+    except Exception as e:
+        return False, f"resolve_failed:{e}"
+
+    user_id = int(getattr(user_entity, "id", 0) or 0)
+    if user_id and await user_is_member_of_target_chat(user_id):
+        return True, "already_member"
+
+    try:
+        await client(InviteToChannelRequest(channel=channel_entity, users=[user_entity]))
+        return True, "invited"
+    except Exception as e:
+        return False, f"invite_failed:{e}"
+
+
 async def resolve_channel_entity_safe():
     try:
         dialogs = await client.get_dialogs(limit=200)
@@ -432,9 +451,16 @@ async def handle_message(event):
             username_match = USERNAME_RE.search(text)
             if username_match:
                 username = username_match.group(1).lower()
+                invite_ok, invite_status = await invite_username_to_target_chat(username)
+                if not invite_ok:
+                    print(f"Warning: cannot add @{username} to target chat: {invite_status}", flush=True)
+
                 if username not in contacted_usernames:
                     try:
-                        await client.send_message(f"@{username}", OUTREACH_TEXT)
+                        dm_text = OUTREACH_TEXT
+                        if invite_ok and invite_status == "invited":
+                            dm_text += "\n\nТебе вже додано в групу 🙂"
+                        await client.send_message(f"@{username}", dm_text)
                         contacted_usernames.add(username)
                         state["contacted_usernames"] = sorted(contacted_usernames)
                         save_state(state)
