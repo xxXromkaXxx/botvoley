@@ -2,7 +2,9 @@ import asyncio
 import html
 import json
 import os
+import random
 import re
+import time
 from pathlib import Path
 
 from telethon import TelegramClient, events
@@ -57,6 +59,11 @@ OUTREACH_TEXT = (
     "Зараз плануємо волейбол і шукаємо нових людей у команду. "
     "Будемо раді бачити тебе 🙂"
 )
+DAIV_AUTO_MIN_INTERVAL_SEC = 8 * 60 * 60
+DAIV_AUTO_MAX_INTERVAL_SEC = 9 * 60 * 60
+DAIV_AUTO_MIN_LIKES = 5
+DAIV_AUTO_MAX_LIKES = 6
+DAIV_AUTO_CONTROL_TEXTS = {"💤", "1", "1 👍", "❤️"}
 
 if not all([API_ID, API_HASH, SESSION_STRING, CHANNEL_ID_RAW]):
     raise RuntimeError("Set API_ID, API_HASH, SESSION_STRING, CHANNEL_ID in env")
@@ -83,6 +90,7 @@ def load_state() -> dict:
             "awaiting_intro_users": [],
             "events": {},
             "contacted_usernames": [],
+            "last_manual_daiv_ts": 0,
         }
     try:
         data = json.loads(STATE_FILE.read_text(encoding="utf-8"))
@@ -123,6 +131,7 @@ def load_state() -> dict:
             "awaiting_intro_users": awaiting,
             "events": events_map,
             "contacted_usernames": contacted,
+            "last_manual_daiv_ts": int(data.get("last_manual_daiv_ts", 0) or 0),
         }
     except Exception:
         return {
@@ -130,6 +139,7 @@ def load_state() -> dict:
             "awaiting_intro_users": [],
             "events": {},
             "contacted_usernames": [],
+            "last_manual_daiv_ts": 0,
         }
 
 
@@ -139,6 +149,7 @@ def save_state(state: dict) -> None:
         "awaiting_intro_users": sorted(int(x) for x in state.get("awaiting_intro_users", [])),
         "events": {},
         "contacted_usernames": sorted(set(str(x).lower() for x in state.get("contacted_usernames", []))),
+        "last_manual_daiv_ts": int(state.get("last_manual_daiv_ts", 0) or 0),
     }
 
     for chat_id, event_data in state.get("events", {}).items():
@@ -411,6 +422,67 @@ async def resolve_channel_entity_safe():
         return None
 
 
+def is_daiv_chat_message(event) -> bool:
+    if not DAIVINCHIK_CHAT_ID:
+        return False
+    if not event.is_private:
+        return False
+    return int(event.chat_id or 0) == int(DAIVINCHIK_CHAT_ID)
+
+
+async def send_daiv_message(text: str, delay_sec: tuple | None = None):
+    global last_bot_daiv_action_ts
+    if not DAIVINCHIK_CHAT_ID:
+        return
+    if delay_sec:
+        await asyncio.sleep(random.uniform(delay_sec[0], delay_sec[1]))
+    await client.send_message(DAIVINCHIK_CHAT_ID, text)
+    last_bot_daiv_action_ts = int(time.time())
+
+
+async def finish_daiv_auto_session(force_sleep: bool = False):
+    if not daiv_auto_session["active"]:
+        return
+    daiv_auto_session["active"] = False
+    if force_sleep:
+        try:
+            await send_daiv_message("💤", (0.7, 1.3))
+        except Exception:
+            pass
+
+
+async def start_daiv_auto_session():
+    if not DAIVINCHIK_CHAT_ID or daiv_auto_session["active"]:
+        return
+    daiv_auto_session["active"] = True
+    daiv_auto_session["done"] = 0
+    daiv_auto_session["target"] = random.randint(DAIV_AUTO_MIN_LIKES, DAIV_AUTO_MAX_LIKES)
+    try:
+        await send_daiv_message("💤")
+        await send_daiv_message("1", (2.0, 3.0))
+    except Exception as e:
+        print(f"Warning: cannot start daiv auto session: {e}", flush=True)
+        await finish_daiv_auto_session(force_sleep=True)
+
+
+async def daiv_auto_worker():
+    while True:
+        interval = random.randint(DAIV_AUTO_MIN_INTERVAL_SEC, DAIV_AUTO_MAX_INTERVAL_SEC)
+        await asyncio.sleep(interval)
+
+        if not DAIVINCHIK_CHAT_ID:
+            continue
+        if daiv_auto_session["active"]:
+            continue
+
+        last_manual = int(state.get("last_manual_daiv_ts", 0) or 0)
+        idle_for = int(time.time()) - last_manual if last_manual else 10**9
+        if idle_for < interval:
+            continue
+
+        await start_daiv_auto_session()
+
+
 state = load_state()
 processed_users = set(state["processed_users"])
 awaiting_intro_users = set(state["awaiting_intro_users"])
@@ -418,6 +490,8 @@ events_state = state["events"]
 contacted_usernames = set(state.get("contacted_usernames", []))
 client = TelegramClient(StringSession(SESSION_STRING), API_ID, API_HASH)
 channel_entity = None
+last_bot_daiv_action_ts = 0
+daiv_auto_session = {"active": False, "done": 0, "target": 0}
 
 
 @client.on(events.NewMessage())
@@ -431,20 +505,29 @@ async def handle_message(event):
     command, command_args = split_command_and_args(text)
     user_id = int(event.sender_id or 0)
 
+    # Track manual activity in Daiv chat to pause periodic auto sessions.
+    if is_daiv_chat_message(event) and event.out:
+        now_ts = int(time.time())
+        is_bot_generated = (now_ts - last_bot_daiv_action_ts <= 6) and (text in DAIV_AUTO_CONTROL_TEXTS)
+        if not is_bot_generated:
+            state["last_manual_daiv_ts"] = now_ts
+            save_state(state)
+        return
+
     # Auto-flow for Daivinchik-like bot messages.
     if event.is_private and getattr(sender, "bot", False):
-        if DAIVINCHIK_CHAT_ID and int(event.chat_id or 0) != DAIVINCHIK_CHAT_ID:
+        if not is_daiv_chat_message(event):
             return
 
         likes_match = DAIVINCHIK_LIKES_RE.search(text)
         if likes_match:
             likes_count = int(likes_match.group(1))
             if likes_count > 0:
-                await client.send_message(event.chat_id, "1 👍")
+                await send_daiv_message("1 👍")
             return
 
         if DAIVINCHIK_PROFILE_LIKED_TEXT.lower() in text_lower:
-            await client.send_message(event.chat_id, "❤️")
+            await send_daiv_message("❤️")
             return
 
         if DAIVINCHIK_START_CHAT_TEXT.lower() in text_lower:
@@ -467,6 +550,38 @@ async def handle_message(event):
                     except Exception as e:
                         print(f"Warning: cannot outreach @{username}: {e}", flush=True)
             return
+
+        # Auto-like session for profile browsing in Daiv chat.
+        if daiv_auto_session["active"]:
+            try:
+                end_markers = [
+                    "Я більше не хочу нікого дивитись",
+                    "більше немає",
+                    "закінчились",
+                    "не знайдено",
+                ]
+                if any(m.lower() in text_lower for m in end_markers):
+                    await finish_daiv_auto_session(force_sleep=True)
+                    return
+
+                skip_markers = [
+                    "Ти сподобався",
+                    "Комусь сподобалась твоя анкета",
+                    "Починай спілкуватися",
+                ]
+                if any(m.lower() in text_lower for m in skip_markers):
+                    return
+
+                if daiv_auto_session["done"] < daiv_auto_session["target"]:
+                    await send_daiv_message("❤️", (2.0, 3.0))
+                    daiv_auto_session["done"] += 1
+                    if daiv_auto_session["done"] >= daiv_auto_session["target"]:
+                        await finish_daiv_auto_session(force_sleep=True)
+                return
+            except Exception as e:
+                print(f"Warning: daiv auto-like flow failed: {e}", flush=True)
+                await finish_daiv_auto_session(force_sleep=True)
+                return
 
         # Ignore other bot messages.
         return
@@ -662,6 +777,10 @@ async def main():
     if channel_entity is not None:
         print(f"Resolved channel entity id: {getattr(channel_entity, 'id', 'unknown')}", flush=True)
     print(f"Process once: {PROCESS_ONCE}", flush=True)
+    if DAIVINCHIK_CHAT_ID:
+        print(f"Daiv chat id: {DAIVINCHIK_CHAT_ID}", flush=True)
+
+    client.loop.create_task(daiv_auto_worker())
 
     await client(UpdateStatusRequest(offline=True))
     await client.run_until_disconnected()
