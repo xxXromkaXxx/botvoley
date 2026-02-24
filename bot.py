@@ -64,6 +64,7 @@ DAIV_AUTO_MAX_INTERVAL_SEC = 9 * 60 * 60
 DAIV_AUTO_MIN_LIKES = 5
 DAIV_AUTO_MAX_LIKES = 6
 DAIV_AUTO_CONTROL_TEXTS = {"💤", "1", "1 👍", "❤️"}
+DAIV_AUTO_CHECK_EVERY_SEC = 5 * 60
 
 if not all([API_ID, API_HASH, SESSION_STRING, CHANNEL_ID_RAW]):
     raise RuntimeError("Set API_ID, API_HASH, SESSION_STRING, CHANNEL_ID in env")
@@ -92,6 +93,7 @@ def load_state() -> dict:
             "events": {},
             "contacted_usernames": [],
             "last_manual_daiv_ts": 0,
+            "next_auto_daiv_ts": 0,
         }
     try:
         data = json.loads(STATE_FILE.read_text(encoding="utf-8"))
@@ -135,6 +137,7 @@ def load_state() -> dict:
             "events": events_map,
             "contacted_usernames": contacted,
             "last_manual_daiv_ts": int(data.get("last_manual_daiv_ts", 0) or 0),
+            "next_auto_daiv_ts": int(data.get("next_auto_daiv_ts", 0) or 0),
         }
     except Exception:
         return {
@@ -144,6 +147,7 @@ def load_state() -> dict:
             "events": {},
             "contacted_usernames": [],
             "last_manual_daiv_ts": 0,
+            "next_auto_daiv_ts": 0,
         }
 
 
@@ -157,6 +161,7 @@ def save_state(state: dict) -> None:
         "events": {},
         "contacted_usernames": sorted(set(str(x).lower() for x in state.get("contacted_usernames", []))),
         "last_manual_daiv_ts": int(state.get("last_manual_daiv_ts", 0) or 0),
+        "next_auto_daiv_ts": int(state.get("next_auto_daiv_ts", 0) or 0),
     }
 
     for chat_id, event_data in state.get("events", {}).items():
@@ -509,6 +514,14 @@ async def send_daiv_message(text: str, delay_sec: tuple | None = None):
     last_bot_daiv_action_ts = int(time.time())
 
 
+def schedule_next_daiv_auto_run(from_ts: int | None = None) -> int:
+    base_ts = int(from_ts or time.time())
+    next_ts = base_ts + random.randint(DAIV_AUTO_MIN_INTERVAL_SEC, DAIV_AUTO_MAX_INTERVAL_SEC)
+    state["next_auto_daiv_ts"] = next_ts
+    save_state(state)
+    return next_ts
+
+
 async def finish_daiv_auto_session(force_sleep: bool = False):
     if not daiv_auto_session["active"]:
         return
@@ -527,6 +540,7 @@ async def start_daiv_auto_session():
     daiv_auto_session["done"] = 0
     daiv_auto_session["target"] = random.randint(DAIV_AUTO_MIN_LIKES, DAIV_AUTO_MAX_LIKES)
     try:
+        schedule_next_daiv_auto_run()
         await send_daiv_message("💤")
         await send_daiv_message("1", (2.0, 3.0))
     except Exception as e:
@@ -536,17 +550,25 @@ async def start_daiv_auto_session():
 
 async def daiv_auto_worker():
     while True:
-        interval = random.randint(DAIV_AUTO_MIN_INTERVAL_SEC, DAIV_AUTO_MAX_INTERVAL_SEC)
-        await asyncio.sleep(interval)
+        await asyncio.sleep(DAIV_AUTO_CHECK_EVERY_SEC)
 
         if not DAIVINCHIK_CHAT_ID:
             continue
         if daiv_auto_session["active"]:
             continue
 
+        now_ts = int(time.time())
+        next_ts = int(state.get("next_auto_daiv_ts", 0) or 0)
+        if next_ts == 0:
+            schedule_next_daiv_auto_run(now_ts)
+            continue
+        if now_ts < next_ts:
+            continue
+
         last_manual = int(state.get("last_manual_daiv_ts", 0) or 0)
-        idle_for = int(time.time()) - last_manual if last_manual else 10**9
-        if idle_for < interval:
+        idle_for = now_ts - last_manual if last_manual else 10**9
+        if idle_for < DAIV_AUTO_MIN_INTERVAL_SEC:
+            schedule_next_daiv_auto_run(now_ts)
             continue
 
         await start_daiv_auto_session()
@@ -581,7 +603,7 @@ async def handle_message(event):
         is_bot_generated = (now_ts - last_bot_daiv_action_ts <= 6) and (text in DAIV_AUTO_CONTROL_TEXTS)
         if not is_bot_generated:
             state["last_manual_daiv_ts"] = now_ts
-            save_state(state)
+            schedule_next_daiv_auto_run(now_ts)
         return
 
     # Auto-flow for Daivinchik-like bot messages.
@@ -871,6 +893,7 @@ async def main():
     print(f"Process once: {PROCESS_ONCE}", flush=True)
     if DAIVINCHIK_CHAT_ID:
         print(f"Daiv chat id: {DAIVINCHIK_CHAT_ID}", flush=True)
+        print(f"Next daiv auto run ts: {int(state.get('next_auto_daiv_ts', 0) or 0)}", flush=True)
 
     client.loop.create_task(daiv_auto_worker())
 
