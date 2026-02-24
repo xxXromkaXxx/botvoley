@@ -532,6 +532,7 @@ async def finish_daiv_auto_session(force_sleep: bool = False):
     if not daiv_auto_session["active"]:
         return
     daiv_auto_session["active"] = False
+    daiv_auto_session["cooldown_until"] = int(time.time()) + 120
     if force_sleep:
         try:
             await send_daiv_message("💤", (0.7, 1.3))
@@ -545,6 +546,8 @@ async def start_daiv_auto_session():
     daiv_auto_session["active"] = True
     daiv_auto_session["done"] = 0
     daiv_auto_session["target"] = random.randint(DAIV_AUTO_MIN_LIKES, DAIV_AUTO_MAX_LIKES)
+    daiv_auto_session["started_ts"] = int(time.time())
+    daiv_auto_session["cooldown_until"] = 0
     try:
         schedule_next_daiv_auto_run()
         await send_daiv_message("💤")
@@ -560,6 +563,8 @@ async def start_daiv_auto_session_with_target(target_likes: int):
     daiv_auto_session["active"] = True
     daiv_auto_session["done"] = 0
     daiv_auto_session["target"] = max(1, min(20, int(target_likes)))
+    daiv_auto_session["started_ts"] = int(time.time())
+    daiv_auto_session["cooldown_until"] = 0
     try:
         schedule_next_daiv_auto_run()
         await send_daiv_message("💤")
@@ -606,7 +611,7 @@ contacted_usernames = set(state.get("contacted_usernames", []))
 client = TelegramClient(StringSession(SESSION_STRING), API_ID, API_HASH)
 channel_entity = None
 last_bot_daiv_action_ts = 0
-daiv_auto_session = {"active": False, "done": 0, "target": 0}
+daiv_auto_session = {"active": False, "done": 0, "target": 0, "started_ts": 0, "cooldown_until": 0}
 
 
 @client.on(events.NewMessage())
@@ -633,6 +638,11 @@ async def handle_message(event):
     if event.is_private and getattr(sender, "bot", False):
         if not is_daiv_chat_message(event):
             return
+
+        now_ts = int(time.time())
+        if int(daiv_auto_session.get("cooldown_until", 0) or 0) > now_ts:
+            if DAIVINCHIK_PROFILE_LIKED_TEXT.lower() in text_lower:
+                return
 
         likes_match = DAIVINCHIK_LIKES_RE.search(text)
         if likes_match:
@@ -669,6 +679,12 @@ async def handle_message(event):
         # Auto-like session for profile browsing in Daiv chat.
         if daiv_auto_session["active"]:
             try:
+                # After sending "1", wait 4-5s before first possible like.
+                if daiv_auto_session["done"] == 0:
+                    started_ts = int(daiv_auto_session.get("started_ts", now_ts) or now_ts)
+                    if now_ts - started_ts < 5:
+                        return
+
                 end_markers = [
                     "Я більше не хочу нікого дивитись",
                     "більше немає",
@@ -688,7 +704,7 @@ async def handle_message(event):
                     return
 
                 if daiv_auto_session["done"] < daiv_auto_session["target"]:
-                    await send_daiv_message("❤️", (2.0, 3.0))
+                    await send_daiv_message("❤️", (2.0, 2.4))
                     daiv_auto_session["done"] += 1
                     if daiv_auto_session["done"] >= daiv_auto_session["target"]:
                         await finish_daiv_auto_session(force_sleep=True)
