@@ -26,7 +26,7 @@ REPLY_TEXT = os.getenv(
 STATE_FILE = Path(os.getenv("STATE_FILE", "state.json"))
 PROCESS_ONCE = os.getenv("PROCESS_ONCE", "1").strip() == "1"
 TEST_USER_ID = int(os.getenv("TEST_USER_ID", "0"))
-DAIVINCHIK_CHAT_ID_RAW = os.getenv("DAIVINCHIK_CHAT_ID", "0")
+DAIVINCHIK_CHAT_ID_RAW = "1234060895"
 DAIVINCHIK_CHAT_ID = int(DAIVINCHIK_CHAT_ID_RAW)
 
 MEETING_TEXT_FALLBACK = (
@@ -40,12 +40,14 @@ ADMIN_WHO_COMMANDS = {"/who", "/rsvp", "/хто"}
 ADMIN_CLOSE_COMMANDS = {"/close", "/закрити"}
 ADMIN_FINAL_COMMANDS = {"/final", "/підсумок"}
 ADMIN_HELP_COMMANDS = {"/help", "/команди"}
+ADMIN_AUTOLIKE_COMMANDS = {"/autolike", "/лайкстарт"}
 ALL_ADMIN_COMMANDS = (
     ADMIN_MEETING_COMMANDS
     | ADMIN_WHO_COMMANDS
     | ADMIN_CLOSE_COMMANDS
     | ADMIN_FINAL_COMMANDS
     | ADMIN_HELP_COMMANDS
+    | ADMIN_AUTOLIKE_COMMANDS
 )
 YES_MARKERS = {"+", "+1", "йду", "я за", "пирйду", "прийду", "я в темі", "я буду"}
 NO_MARKERS = {"-", "-1", "не йду", "не буду"}
@@ -409,10 +411,13 @@ def build_help_text() -> str:
         "Те саме, що /close.\n\n"
         "/help\n"
         "Показати цю довідку.\n\n"
+        "/autolike <кількість>\n"
+        "Запустити автолайк в Дайвінчику вручну (1..20).\n\n"
         "Приклад:\n"
         "/meeting сьогодні | Аркадія, 2 майданчик | волейбол\n"
         "У групі голоси: +, + 19:00, йду 19:30, -\n"
-        "/close 19:30"
+        "/close 19:30\n"
+        "/autolike 6"
     )
 
 
@@ -547,6 +552,23 @@ async def start_daiv_auto_session():
     except Exception as e:
         print(f"Warning: cannot start daiv auto session: {e}", flush=True)
         await finish_daiv_auto_session(force_sleep=True)
+
+
+async def start_daiv_auto_session_with_target(target_likes: int):
+    if not DAIVINCHIK_CHAT_ID or daiv_auto_session["active"]:
+        return False
+    daiv_auto_session["active"] = True
+    daiv_auto_session["done"] = 0
+    daiv_auto_session["target"] = max(1, min(20, int(target_likes)))
+    try:
+        schedule_next_daiv_auto_run()
+        await send_daiv_message("💤")
+        await send_daiv_message("1", (2.0, 3.0))
+        return True
+    except Exception as e:
+        print(f"Warning: cannot start manual daiv auto session: {e}", flush=True)
+        await finish_daiv_auto_session(force_sleep=True)
+        return False
 
 
 async def daiv_auto_worker():
@@ -742,6 +764,35 @@ async def handle_message(event):
                 await client.send_message(event.chat_id, "Збір закрито.")
             else:
                 await client.send_message(event.chat_id, "Активного збору немає. Запусти /meeting")
+            return
+
+        if command in ADMIN_AUTOLIKE_COMMANDS:
+            if not DAIVINCHIK_CHAT_ID:
+                await client.send_message(event.chat_id, "DAIVINCHIK_CHAT_ID не налаштовано.")
+                return
+            if daiv_auto_session["active"]:
+                await client.send_message(
+                    event.chat_id,
+                    f"Автолайк вже запущений ({daiv_auto_session['done']}/{daiv_auto_session['target']}).",
+                )
+                return
+
+            likes_target = DAIV_AUTO_MIN_LIKES
+            if command_args.strip():
+                try:
+                    likes_target = int(command_args.strip())
+                except Exception:
+                    await client.send_message(event.chat_id, "Формат: /autolike <число_1_20>")
+                    return
+
+            ok = await start_daiv_auto_session_with_target(likes_target)
+            if ok:
+                await client.send_message(
+                    event.chat_id,
+                    f"Автолайк стартував. Ціль: {daiv_auto_session['target']} лайків.",
+                )
+            else:
+                await client.send_message(event.chat_id, "Не вдалося запустити автолайк.")
             return
 
     # Group/channel listener for RSVP only (commands disabled there).
