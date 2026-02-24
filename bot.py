@@ -26,7 +26,8 @@ REPLY_TEXT = os.getenv(
 STATE_FILE = Path(os.getenv("STATE_FILE", "state.json"))
 PROCESS_ONCE = os.getenv("PROCESS_ONCE", "1").strip() == "1"
 TEST_USER_ID = int(os.getenv("TEST_USER_ID", "0"))
-DAIVINCHIK_CHAT_ID = int(os.getenv("DAIVINCHIK_CHAT_ID", "0"))
+DAIVINCHIK_CHAT_ID_RAW = os.getenv("DAIVINCHIK_CHAT_ID", "0")
+DAIVINCHIK_CHAT_ID = int(DAIVINCHIK_CHAT_ID_RAW)
 
 MEETING_TEXT_FALLBACK = (
     "Ну що, збираємось?\n"
@@ -891,8 +892,9 @@ async def main():
     if channel_entity is not None:
         print(f"Resolved channel entity id: {getattr(channel_entity, 'id', 'unknown')}", flush=True)
     print(f"Process once: {PROCESS_ONCE}", flush=True)
+    print(f"Daiv chat id (raw): {DAIVINCHIK_CHAT_ID_RAW}", flush=True)
+    print(f"Daiv chat id (parsed): {DAIVINCHIK_CHAT_ID}", flush=True)
     if DAIVINCHIK_CHAT_ID:
-        print(f"Daiv chat id: {DAIVINCHIK_CHAT_ID}", flush=True)
         print(f"Next daiv auto run ts: {int(state.get('next_auto_daiv_ts', 0) or 0)}", flush=True)
 
     client.loop.create_task(daiv_auto_worker())
