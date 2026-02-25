@@ -31,9 +31,13 @@ DAIVINCHIK_CHAT_ID = int(DAIVINCHIK_CHAT_ID_RAW)
 
 MEETING_TEXT_FALLBACK = (
     "Ну що, збираємось?\n"
-    "Напишіть реплаєм на це повідомлення:\n"
+    "Голосуйте, хто може прийти.\n"
+    "Відповідайте реплаєм на це повідомлення:\n"
     "+ або + 19:00 якщо будете\n"
-    "- якщо не будете"
+    "- якщо не будете\n\n"
+    "Якщо час не підходить — пропонуйте свій у форматі “+ 14:30”.\n"
+    "Будь хитрим лисом 😁\n"
+    "Будьте активними 😜"
 )
 ADMIN_MEETING_COMMANDS = {"/meeting", "/discuss", "/збір", "/обговорення"}
 ADMIN_WHO_COMMANDS = {"/who", "/rsvp", "/хто"}
@@ -94,9 +98,11 @@ def load_state() -> dict:
             "awaiting_intro_users": [],
             "intro_name_tries": {},
             "events": {},
+            "events_history": {},
             "contacted_usernames": [],
             "last_manual_daiv_ts": 0,
             "next_auto_daiv_ts": 0,
+            "next_meeting_id": 1,
         }
     try:
         data = json.loads(STATE_FILE.read_text(encoding="utf-8"))
@@ -116,6 +122,7 @@ def load_state() -> dict:
                 "date": str(payload.get("date", "Не вказано")),
                 "time": str(payload.get("time", "Не вказано")),
                 "place": str(payload.get("place", "Не вказано")),
+                "meeting_id": int(payload.get("meeting_id", 0) or 0),
                 "participants": {},
             }
 
@@ -134,14 +141,46 @@ def load_state() -> dict:
 
             events_map[str(chat_id)] = event_item
 
+        history_map = {}
+        for chat_id, rows in data.get("events_history", {}).items():
+            parsed_rows = []
+            if not isinstance(rows, list):
+                rows = []
+            for payload in rows:
+                msg_id = int(payload.get("message_id", 0))
+                row = {
+                    "message_id": msg_id,
+                    "is_open": bool(payload.get("is_open", False)),
+                    "started_at_message_id": int(payload.get("started_at_message_id", msg_id)),
+                    "topic": str(payload.get("topic", "Зустріч")),
+                    "date": str(payload.get("date", "Не вказано")),
+                    "time": str(payload.get("time", "Не вказано")),
+                    "place": str(payload.get("place", "Не вказано")),
+                    "meeting_id": int(payload.get("meeting_id", 0) or 0),
+                    "participants": {},
+                }
+                participants = payload.get("participants", {})
+                for uid, data_item in participants.items():
+                    if isinstance(data_item, dict):
+                        row["participants"][str(uid)] = {
+                            "name": str(data_item.get("name", uid)),
+                            "time": str(data_item.get("time", "")),
+                        }
+                    else:
+                        row["participants"][str(uid)] = {"name": str(data_item), "time": ""}
+                parsed_rows.append(row)
+            history_map[str(chat_id)] = parsed_rows
+
         return {
             "processed_users": users,
             "awaiting_intro_users": awaiting,
             "intro_name_tries": intro_name_tries,
             "events": events_map,
+            "events_history": history_map,
             "contacted_usernames": contacted,
             "last_manual_daiv_ts": int(data.get("last_manual_daiv_ts", 0) or 0),
             "next_auto_daiv_ts": int(data.get("next_auto_daiv_ts", 0) or 0),
+            "next_meeting_id": max(1, int(data.get("next_meeting_id", 1) or 1)),
         }
     except Exception:
         return {
@@ -149,9 +188,11 @@ def load_state() -> dict:
             "awaiting_intro_users": [],
             "intro_name_tries": {},
             "events": {},
+            "events_history": {},
             "contacted_usernames": [],
             "last_manual_daiv_ts": 0,
             "next_auto_daiv_ts": 0,
+            "next_meeting_id": 1,
         }
 
 
@@ -163,9 +204,11 @@ def save_state(state: dict) -> None:
             str(k): int(v) for k, v in state.get("intro_name_tries", {}).items()
         },
         "events": {},
+        "events_history": {},
         "contacted_usernames": sorted(set(str(x).lower() for x in state.get("contacted_usernames", []))),
         "last_manual_daiv_ts": int(state.get("last_manual_daiv_ts", 0) or 0),
         "next_auto_daiv_ts": int(state.get("next_auto_daiv_ts", 0) or 0),
+        "next_meeting_id": max(1, int(state.get("next_meeting_id", 1) or 1)),
     }
 
     for chat_id, event_data in state.get("events", {}).items():
@@ -179,6 +222,7 @@ def save_state(state: dict) -> None:
             "date": str(event_data.get("date", "Не вказано")),
             "time": str(event_data.get("time", "Не вказано")),
             "place": str(event_data.get("place", "Не вказано")),
+            "meeting_id": int(event_data.get("meeting_id", 0) or 0),
             "participants": {
                 str(uid): {
                     "name": str(data_item.get("name", uid)) if isinstance(data_item, dict) else str(data_item),
@@ -187,6 +231,36 @@ def save_state(state: dict) -> None:
                 for uid, data_item in event_data.get("participants", {}).items()
             },
         }
+
+    for chat_id, rows in state.get("events_history", {}).items():
+        safe_rows = []
+        if not isinstance(rows, list):
+            rows = []
+        for event_data in rows:
+            safe_rows.append(
+                {
+                    "message_id": int(event_data.get("message_id", 0)),
+                    "is_open": bool(event_data.get("is_open", False)),
+                    "started_at_message_id": int(
+                        event_data.get("started_at_message_id", event_data.get("message_id", 0))
+                    ),
+                    "topic": str(event_data.get("topic", "Зустріч")),
+                    "date": str(event_data.get("date", "Не вказано")),
+                    "time": str(event_data.get("time", "Не вказано")),
+                    "place": str(event_data.get("place", "Не вказано")),
+                    "meeting_id": int(event_data.get("meeting_id", 0) or 0),
+                    "participants": {
+                        str(uid): {
+                            "name": str(data_item.get("name", uid))
+                            if isinstance(data_item, dict)
+                            else str(data_item),
+                            "time": str(data_item.get("time", "")) if isinstance(data_item, dict) else "",
+                        }
+                        for uid, data_item in event_data.get("participants", {}).items()
+                    },
+                }
+            )
+        payload["events_history"][str(chat_id)] = safe_rows
 
     STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
     STATE_FILE.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
@@ -297,6 +371,18 @@ def split_command_and_args(text: str):
     return cmd, args
 
 
+def parse_meeting_id_arg(args: str) -> int | None:
+    value = args.strip()
+    if not value:
+        return None
+    if value.startswith("#"):
+        value = value[1:].strip()
+    if not value.isdigit():
+        return None
+    parsed = int(value)
+    return parsed if parsed > 0 else None
+
+
 def normalize_meeting_date(value: str) -> str:
     low = value.strip().lower()
     if low in {"сьогодні", "сьогоднi", "today"}:
@@ -328,9 +414,13 @@ def parse_meeting_payload(args: str) -> dict:
             f"Дата: {date}\n"
             f"Час (база): {time_value}\n"
             f"Місце: {place}\n\n"
-            "Голосування: відповідайте реплаєм на це повідомлення\n"
+            "Голосуйте, хто може прийти.\n"
+            "Відповідайте реплаєм на це повідомлення:\n"
             "+ або + 19:00 якщо будете\n"
-            "- якщо не будете"
+            "- якщо не будете\n\n"
+            f"Якщо {time_value} не підходить — пропонуйте свій час у форматі “+ 14:30”.\n"
+            "Будь хитрим лисом 😁\n"
+            "Будьте активними 😜"
         )
         return {"topic": topic, "date": date, "time": time_value, "place": place, "text": text}
 
@@ -356,9 +446,13 @@ def parse_meeting_payload(args: str) -> dict:
         "Дата: Не вказано\n"
         "Час (база): Не вказано\n"
         "Місце: Не вказано\n\n"
-        "Голосування: відповідайте реплаєм на це повідомлення\n"
+        "Голосуйте, хто може прийти.\n"
+        "Відповідайте реплаєм на це повідомлення:\n"
         "+ або + 19:00 якщо будете\n"
-        "- якщо не будете"
+        "- якщо не будете\n\n"
+        "Якщо час не підходить — пропонуйте свій у форматі “+ 14:30”.\n"
+        "Будь хитрим лисом 😁\n"
+        "Будьте активними 😜"
     )
     return {"topic": args, "date": "Не вказано", "time": "Не вказано", "place": "Не вказано", "text": text}
 
@@ -403,8 +497,10 @@ def user_display_name(sender) -> str:
 
 def render_rsvp_summary(event_data: dict) -> str:
     participants = event_data.get("participants", {})
+    meeting_id = int(event_data.get("meeting_id", 0) or 0)
+    meeting_prefix = f"ID збору: #{meeting_id}\n" if meeting_id else ""
     if not participants:
-        return "Хто приходить: 0\n\nПоки що ніхто не підтвердив участь."
+        return f"{meeting_prefix}Хто приходить: 0\n\nПоки що ніхто не підтвердив участь."
 
     rows = []
     time_stats = {}
@@ -417,7 +513,7 @@ def render_rsvp_summary(event_data: dict) -> str:
         if time_hint:
             time_stats[time_hint] = time_stats.get(time_hint, 0) + 1
 
-    lines = [f"Хто приходить: {len(rows)}", ""]
+    lines = [f"{meeting_prefix}Хто приходить: {len(rows)}", ""]
     for idx, (name, time_hint) in enumerate(rows, start=1):
         if time_hint:
             lines.append(f"{idx}. {name} ({time_hint})")
@@ -440,6 +536,7 @@ def render_final_event_text(event_data: dict, final_time: str) -> str:
     time_value = choose_final_time(event_data, final_time)
     return (
         f"Отже, збираємось:\n"
+        f"ID збору: #{int(event_data.get('meeting_id', 0) or 0)}\n"
         f"Подія: {topic}\n"
         f"Дата: {date}\n"
         f"Час: {time_value}\n"
@@ -454,7 +551,9 @@ def build_help_text() -> str:
         "/meeting <дата> | <час> | <місце> | <текст>\n"
         "Запустити збір.\n\n"
         "/who\n"
-        "Показати поточну кількість і список учасників.\n\n"
+        "Показати поточну кількість і список учасників активного збору.\n\n"
+        "/who <id>\n"
+        "Показати збір з архіву за ID (наприклад: /who 3).\n\n"
         "/close <час>\n"
         "Закрити збір і опублікувати фінал.\n\n"
         "/final <час>\n"
@@ -511,10 +610,37 @@ async def maybe_auto_finalize_meeting(chat, chat_key: str):
     active_event["is_open"] = False
     events_state[chat_key] = active_event
     state["events"] = events_state
+    archive_event(chat_key, active_event)
     save_state(state)
 
     final_post = render_final_event_text(active_event, "")
     await client.send_message(chat, "Збір закрито автоматично (проголосували всі).\n\n" + final_post)
+
+
+def archive_event(chat_key: str, event_data: dict) -> None:
+    meeting_id = int(event_data.get("meeting_id", 0) or 0)
+    history = state.get("events_history", {})
+    rows = history.get(chat_key, [])
+    updated = False
+    for idx, row in enumerate(rows):
+        if int(row.get("meeting_id", 0) or 0) == meeting_id and meeting_id > 0:
+            rows[idx] = event_data
+            updated = True
+            break
+    if not updated:
+        rows.append(event_data)
+    history[chat_key] = rows
+    state["events_history"] = history
+
+
+def find_event_by_meeting_id(chat_key: str, meeting_id: int):
+    active = events_state.get(chat_key)
+    if active and int(active.get("meeting_id", 0) or 0) == meeting_id:
+        return active, "active"
+    for row in state.get("events_history", {}).get(chat_key, []):
+        if int(row.get("meeting_id", 0) or 0) == meeting_id:
+            return row, "history"
+    return None, ""
 
 
 async def user_is_member_of_target_chat(user_id: int) -> bool:
@@ -836,7 +962,10 @@ async def handle_message(event):
 
         if command in ADMIN_MEETING_COMMANDS:
             payload = parse_meeting_payload(command_args)
-            posted = await client.send_message(target_chat, payload["text"])
+            meeting_id = int(state.get("next_meeting_id", 1) or 1)
+            state["next_meeting_id"] = meeting_id + 1
+            post_text = f"ID збору: #{meeting_id}\n{payload['text']}"
+            posted = await client.send_message(target_chat, post_text)
             events_state[target_chat_key] = {
                 "message_id": int(posted.id),
                 "is_open": True,
@@ -845,18 +974,30 @@ async def handle_message(event):
                 "date": payload["date"],
                 "time": payload["time"],
                 "place": payload["place"],
+                "meeting_id": meeting_id,
                 "participants": {},
             }
             state["events"] = events_state
             save_state(state)
-            await client.send_message(event.chat_id, "Збір створено.")
+            await client.send_message(event.chat_id, f"Збір #{meeting_id} створено.")
             return
 
         if command in ADMIN_WHO_COMMANDS:
+            lookup_id = parse_meeting_id_arg(command_args)
+            if lookup_id is not None:
+                found, source = find_event_by_meeting_id(target_chat_key, lookup_id)
+                if found:
+                    suffix = " (активний)" if source == "active" else " (архів)"
+                    await client.send_message(event.chat_id, render_rsvp_summary(found) + suffix)
+                else:
+                    await client.send_message(event.chat_id, f"Збір з ID #{lookup_id} не знайдено.")
+                return
             if active_event:
                 await client.send_message(event.chat_id, render_rsvp_summary(active_event))
             else:
-                await client.send_message(event.chat_id, "Активного збору немає. Запусти /meeting")
+                await client.send_message(
+                    event.chat_id, "Активного збору немає. Для архіву: /who <id> (наприклад /who 3)"
+                )
             return
 
         if command in ADMIN_CLOSE_COMMANDS or command in ADMIN_FINAL_COMMANDS:
@@ -864,6 +1005,7 @@ async def handle_message(event):
                 active_event["is_open"] = False
                 events_state[target_chat_key] = active_event
                 state["events"] = events_state
+                archive_event(target_chat_key, active_event)
                 save_state(state)
                 final_post = render_final_event_text(active_event, command_args)
                 await client.send_message(target_chat, "Збір закрито.\n\n" + final_post)
