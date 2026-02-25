@@ -44,9 +44,11 @@ ADMIN_WHO_COMMANDS = {"/who", "/rsvp", "/хто"}
 ADMIN_CLOSE_COMMANDS = {"/close", "/закрити"}
 ADMIN_FINAL_COMMANDS = {"/final", "/підсумок"}
 USER_HELP_COMMANDS = {"/help", "/команди"}
-ADMIN_HELP_COMMANDS = {"/heipa", "/адмінка", "/adminhelp"}
+ADMIN_HELP_COMMANDS = {"/helpa", "/адмінка", "/adminhelp"}
 ADMIN_AUTOLIKE_COMMANDS = {"/autolike", "/лайкстарт"}
 AUTOLIKE_OWNER_ID = 1293715368
+MEETING_CREATE_USER_COOLDOWN_SEC = 5 * 60
+MEETING_CREATE_GLOBAL_COOLDOWN_SEC = 90
 ALL_ADMIN_COMMANDS = (
     ADMIN_MEETING_COMMANDS
     | ADMIN_WHO_COMMANDS
@@ -105,6 +107,8 @@ def load_state() -> dict:
             "last_manual_daiv_ts": 0,
             "next_auto_daiv_ts": 0,
             "next_meeting_id": 1,
+            "meeting_last_create_ts": 0,
+            "meeting_creator_last_ts": {},
         }
     try:
         data = json.loads(STATE_FILE.read_text(encoding="utf-8"))
@@ -125,6 +129,9 @@ def load_state() -> dict:
                 "time": str(payload.get("time", "Не вказано")),
                 "place": str(payload.get("place", "Не вказано")),
                 "meeting_id": int(payload.get("meeting_id", 0) or 0),
+                "created_by": int(payload.get("created_by", 0) or 0),
+                "created_by_name": str(payload.get("created_by_name", "")),
+                "created_at_ts": int(payload.get("created_at_ts", 0) or 0),
                 "participants": {},
             }
 
@@ -159,6 +166,9 @@ def load_state() -> dict:
                     "time": str(payload.get("time", "Не вказано")),
                     "place": str(payload.get("place", "Не вказано")),
                     "meeting_id": int(payload.get("meeting_id", 0) or 0),
+                    "created_by": int(payload.get("created_by", 0) or 0),
+                    "created_by_name": str(payload.get("created_by_name", "")),
+                    "created_at_ts": int(payload.get("created_at_ts", 0) or 0),
                     "participants": {},
                 }
                 participants = payload.get("participants", {})
@@ -183,6 +193,10 @@ def load_state() -> dict:
             "last_manual_daiv_ts": int(data.get("last_manual_daiv_ts", 0) or 0),
             "next_auto_daiv_ts": int(data.get("next_auto_daiv_ts", 0) or 0),
             "next_meeting_id": max(1, int(data.get("next_meeting_id", 1) or 1)),
+            "meeting_last_create_ts": int(data.get("meeting_last_create_ts", 0) or 0),
+            "meeting_creator_last_ts": {
+                str(k): int(v) for k, v in data.get("meeting_creator_last_ts", {}).items()
+            },
         }
     except Exception:
         return {
@@ -195,6 +209,8 @@ def load_state() -> dict:
             "last_manual_daiv_ts": 0,
             "next_auto_daiv_ts": 0,
             "next_meeting_id": 1,
+            "meeting_last_create_ts": 0,
+            "meeting_creator_last_ts": {},
         }
 
 
@@ -211,6 +227,10 @@ def save_state(state: dict) -> None:
         "last_manual_daiv_ts": int(state.get("last_manual_daiv_ts", 0) or 0),
         "next_auto_daiv_ts": int(state.get("next_auto_daiv_ts", 0) or 0),
         "next_meeting_id": max(1, int(state.get("next_meeting_id", 1) or 1)),
+        "meeting_last_create_ts": int(state.get("meeting_last_create_ts", 0) or 0),
+        "meeting_creator_last_ts": {
+            str(k): int(v) for k, v in state.get("meeting_creator_last_ts", {}).items()
+        },
     }
 
     for chat_id, event_data in state.get("events", {}).items():
@@ -225,6 +245,9 @@ def save_state(state: dict) -> None:
             "time": str(event_data.get("time", "Не вказано")),
             "place": str(event_data.get("place", "Не вказано")),
             "meeting_id": int(event_data.get("meeting_id", 0) or 0),
+            "created_by": int(event_data.get("created_by", 0) or 0),
+            "created_by_name": str(event_data.get("created_by_name", "")),
+            "created_at_ts": int(event_data.get("created_at_ts", 0) or 0),
             "participants": {
                 str(uid): {
                     "name": str(data_item.get("name", uid)) if isinstance(data_item, dict) else str(data_item),
@@ -251,6 +274,9 @@ def save_state(state: dict) -> None:
                     "time": str(event_data.get("time", "Не вказано")),
                     "place": str(event_data.get("place", "Не вказано")),
                     "meeting_id": int(event_data.get("meeting_id", 0) or 0),
+                    "created_by": int(event_data.get("created_by", 0) or 0),
+                    "created_by_name": str(event_data.get("created_by_name", "")),
+                    "created_at_ts": int(event_data.get("created_at_ts", 0) or 0),
                     "participants": {
                         str(uid): {
                             "name": str(data_item.get("name", uid))
@@ -560,7 +586,11 @@ def build_user_help_text() -> str:
         "Показати список учасників активного збору.\n\n"
         "/who <id>\n"
         "Показати підсумок конкретного збору за ID (наприклад: /who 3).\n\n"
-        "Створення/закриття збору робиться через адмін-команди (/heipa)."
+        "/meeting <дата> | <час> | <місце> | <текст>\n"
+        "Доступно всім учасникам групи (є антифлуд).\n"
+        "У <текст> пиши вид активності + за бажанням короткий опис.\n"
+        "Приклад: футбол 5x5, легка гра без жорсткого контакту.\n\n"
+        "Для повної адмін-довідки: /helpa"
     )
 
 
@@ -570,6 +600,8 @@ def build_admin_help_text() -> str:
         "Усі команди пишемо тільки в ПРИВАТ боту.\n\n"
         "1) Створити збір:\n"
         "/meeting <дата> | <час> | <місце> | <текст>\n"
+        "<текст> = вид активності + опціонально деталі.\n"
+        "Напр.: футбол | або футбол + короткий опис умов.\n"
         "Приклад: /meeting завтра | 19:30 | Аркадія, 2 майданчик | волейбол\n\n"
         "2) Перегляд голосування:\n"
         "/who\n"
@@ -586,7 +618,7 @@ def build_admin_help_text() -> str:
         "Запуск ручного автолайку в Дайвінчику (1..20).\n"
         f"Дозволено тільки user_id={AUTOLIKE_OWNER_ID}.\n\n"
         "5) Довідка:\n"
-        "/heipa\n"
+        "/helpa\n"
         "Показати цю інструкцію."
     )
 
@@ -595,6 +627,16 @@ async def sender_is_admin(chat, user_id: int) -> bool:
     try:
         perms = await client.get_permissions(chat, user_id)
         return bool(getattr(perms, "is_creator", False) or getattr(perms, "is_admin", False))
+    except Exception:
+        return False
+
+
+async def sender_is_member(chat, user_id: int) -> bool:
+    try:
+        await client.get_permissions(chat, user_id)
+        return True
+    except UserNotParticipantError:
+        return False
     except Exception:
         return False
 
@@ -961,9 +1003,22 @@ async def handle_message(event):
         await client.send_message(event.chat_id, build_user_help_text())
         return
 
-    # Private admin control: commands from private chat only.
+    # Private command control: commands from private chat only.
     if event.is_private and command in ALL_ADMIN_COMMANDS:
         if command in ADMIN_HELP_COMMANDS:
+            if channel_entity is None:
+                await client.send_message(
+                    event.chat_id,
+                    f"Не можу знайти CHANNEL_ID={CHANNEL_ID_RAW}. Перевір, що акаунт із SESSION_STRING є в цьому чаті.",
+                )
+                return
+            is_admin_in_target = await sender_is_admin(channel_entity, user_id)
+            if not is_admin_in_target:
+                await client.send_message(
+                    event.chat_id,
+                    f"/helpa доступна тільки адмінам групи CHANNEL_ID={CHANNEL_ID_RAW}.",
+                )
+                return
             await client.send_message(event.chat_id, build_admin_help_text())
             return
 
@@ -974,19 +1029,45 @@ async def handle_message(event):
             )
             return
 
-        is_admin_in_target = await sender_is_admin(channel_entity, user_id)
-        if not is_admin_in_target:
+        is_member_in_target = await sender_is_member(channel_entity, user_id)
+        if not is_member_in_target:
             await client.send_message(
                 event.chat_id,
-                f"Доступ заборонено: user_id={user_id} не адмін у чаті CHANNEL_ID={CHANNEL_ID_RAW}.",
+                f"Доступ заборонено: user_id={user_id} не є учасником чату CHANNEL_ID={CHANNEL_ID_RAW}.",
             )
             return
+        is_admin_in_target = await sender_is_admin(channel_entity, user_id)
 
         target_chat = channel_entity
         target_chat_key = str(int(getattr(target_chat, "id", 0) or 0))
         active_event = events_state.get(target_chat_key)
 
         if command in ADMIN_MEETING_COMMANDS:
+            if active_event and active_event.get("is_open", True):
+                active_id = int(active_event.get("meeting_id", 0) or 0)
+                await client.send_message(
+                    event.chat_id,
+                    f"Вже є активний збір #{active_id}. Закрий його перед створенням нового.",
+                )
+                return
+
+            now_ts = int(time.time())
+            last_global = int(state.get("meeting_last_create_ts", 0) or 0)
+            if now_ts - last_global < MEETING_CREATE_GLOBAL_COOLDOWN_SEC:
+                left = MEETING_CREATE_GLOBAL_COOLDOWN_SEC - (now_ts - last_global)
+                await client.send_message(event.chat_id, f"Антифлуд: новий збір можна створити через {left} сек.")
+                return
+
+            creator_last = state.get("meeting_creator_last_ts", {})
+            last_user = int(creator_last.get(str(user_id), 0) or 0)
+            if now_ts - last_user < MEETING_CREATE_USER_COOLDOWN_SEC:
+                left = MEETING_CREATE_USER_COOLDOWN_SEC - (now_ts - last_user)
+                await client.send_message(
+                    event.chat_id,
+                    f"Антифлуд: для тебе створення нового збору буде доступне через {left} сек.",
+                )
+                return
+
             payload = parse_meeting_payload(command_args)
             meeting_id = int(state.get("next_meeting_id", 1) or 1)
             state["next_meeting_id"] = meeting_id + 1
@@ -1001,9 +1082,15 @@ async def handle_message(event):
                 "time": payload["time"],
                 "place": payload["place"],
                 "meeting_id": meeting_id,
+                "created_by": user_id,
+                "created_by_name": user_display_name(sender),
+                "created_at_ts": now_ts,
                 "participants": {},
             }
             state["events"] = events_state
+            state["meeting_last_create_ts"] = now_ts
+            creator_last[str(user_id)] = now_ts
+            state["meeting_creator_last_ts"] = creator_last
             save_state(state)
             await client.send_message(event.chat_id, f"Збір #{meeting_id} створено.")
             return
@@ -1028,6 +1115,13 @@ async def handle_message(event):
 
         if command in ADMIN_CLOSE_COMMANDS or command in ADMIN_FINAL_COMMANDS:
             if active_event and active_event.get("is_open", True):
+                created_by = int(active_event.get("created_by", 0) or 0)
+                if not is_admin_in_target and created_by != user_id:
+                    await client.send_message(
+                        event.chat_id,
+                        "Закрити збір може тільки автор цього збору або адмін групи.",
+                    )
+                    return
                 active_event["is_open"] = False
                 events_state[target_chat_key] = active_event
                 state["events"] = events_state
@@ -1035,7 +1129,9 @@ async def handle_message(event):
                 save_state(state)
                 final_post = render_final_event_text(active_event, command_args)
                 await client.send_message(target_chat, "Збір закрито.\n\n" + final_post)
-                await client.send_message(event.chat_id, "Збір закрито.")
+                await client.send_message(
+                    event.chat_id, f"Збір #{int(active_event.get('meeting_id', 0) or 0)} закрито."
+                )
             else:
                 await client.send_message(event.chat_id, "Активного збору немає. Запусти /meeting")
             return
