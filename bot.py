@@ -114,6 +114,7 @@ def load_state() -> dict:
                 "started_at_message_id": int(payload.get("started_at_message_id", msg_id)),
                 "topic": str(payload.get("topic", "Зустріч")),
                 "date": str(payload.get("date", "Не вказано")),
+                "time": str(payload.get("time", "Не вказано")),
                 "place": str(payload.get("place", "Не вказано")),
                 "participants": {},
             }
@@ -176,6 +177,7 @@ def save_state(state: dict) -> None:
             ),
             "topic": str(event_data.get("topic", "Зустріч")),
             "date": str(event_data.get("date", "Не вказано")),
+            "time": str(event_data.get("time", "Не вказано")),
             "place": str(event_data.get("place", "Не вказано")),
             "participants": {
                 str(uid): {
@@ -305,39 +307,86 @@ def normalize_meeting_date(value: str) -> str:
 
 
 def parse_meeting_payload(args: str) -> dict:
-    # format: /meeting <date> | <place> | <text>
+    # format: /meeting <date> | <time> | <place> | <text>
     if not args:
         return {
             "topic": "Зустріч",
             "date": "Не вказано",
+            "time": "Не вказано",
             "place": "Не вказано",
             "text": MEETING_TEXT_FALLBACK,
         }
 
     parts = [p.strip() for p in args.split("|")]
-    if len(parts) >= 3:
+    if len(parts) >= 4:
         date = normalize_meeting_date(parts[0])
-        place = parts[1] or "Не вказано"
-        topic = parts[2] or "Зустріч"
+        time_value = parts[1] or "Не вказано"
+        place = parts[2] or "Не вказано"
+        topic = parts[3] or "Зустріч"
         text = (
             f"Збір: {topic}\n"
             f"Дата: {date}\n"
+            f"Час (база): {time_value}\n"
             f"Місце: {place}\n\n"
             "Голосування: відповідайте реплаєм на це повідомлення\n"
             "+ або + 19:00 якщо будете\n"
             "- якщо не будете"
         )
-        return {"topic": topic, "date": date, "place": place, "text": text}
+        return {"topic": topic, "date": date, "time": time_value, "place": place, "text": text}
+
+    # Backward compatible: /meeting <date> | <place> | <text>
+    if len(parts) >= 3:
+        date = normalize_meeting_date(parts[0])
+        place = parts[1] or "Не вказано"
+        topic = parts[2] or "Зустріч"
+        time_value = "Не вказано"
+        text = (
+            f"Збір: {topic}\n"
+            f"Дата: {date}\n"
+            f"Час (база): {time_value}\n"
+            f"Місце: {place}\n\n"
+            "Голосування: відповідайте реплаєм на це повідомлення\n"
+            "+ або + 19:00 якщо будете\n"
+            "- якщо не будете"
+        )
+        return {"topic": topic, "date": date, "time": time_value, "place": place, "text": text}
 
     text = (
         f"Збір: {args}\n"
         "Дата: Не вказано\n"
+        "Час (база): Не вказано\n"
         "Місце: Не вказано\n\n"
         "Голосування: відповідайте реплаєм на це повідомлення\n"
         "+ або + 19:00 якщо будете\n"
         "- якщо не будете"
     )
-    return {"topic": args, "date": "Не вказано", "place": "Не вказано", "text": text}
+    return {"topic": args, "date": "Не вказано", "time": "Не вказано", "place": "Не вказано", "text": text}
+
+
+def choose_final_time(event_data: dict, fallback_time: str) -> str:
+    meeting_time = str(event_data.get("time", "Не вказано")).strip() or "Не вказано"
+    participant_times = []
+    for item in event_data.get("participants", {}).values():
+        t = str(item.get("time", "")).strip()
+        if t:
+            participant_times.append(t)
+
+    if fallback_time.strip():
+        return fallback_time.strip()
+    if not participant_times:
+        return meeting_time
+
+    if len(participant_times) == 1 and meeting_time != "Не вказано" and participant_times[0] != meeting_time:
+        return meeting_time
+
+    counts = {}
+    for t in participant_times:
+        counts[t] = counts.get(t, 0) + 1
+    best_count = max(counts.values())
+    top = sorted([k for k, v in counts.items() if v == best_count])
+    if meeting_time in top:
+        return meeting_time
+    return top[0]
 
 
 def user_display_name(sender) -> str:
@@ -388,9 +437,10 @@ def render_final_event_text(event_data: dict, final_time: str) -> str:
     topic = event_data.get("topic", "Зустріч")
     date = event_data.get("date", "Не вказано")
     place = event_data.get("place", "Не вказано")
-    time_value = final_time.strip() if final_time.strip() else "Не вказано"
+    time_value = choose_final_time(event_data, final_time)
     return (
-        f"Фінал: {topic}\n"
+        f"Отже, збираємось:\n"
+        f"Подія: {topic}\n"
         f"Дата: {date}\n"
         f"Час: {time_value}\n"
         f"Місце: {place}\n\n"
@@ -401,7 +451,7 @@ def render_final_event_text(event_data: dict, final_time: str) -> str:
 def build_help_text() -> str:
     return (
         "Команди управління (писати в приват):\n\n"
-        "/meeting <дата> | <місце> | <текст>\n"
+        "/meeting <дата> | <час> | <місце> | <текст>\n"
         "Запустити збір.\n\n"
         "/who\n"
         "Показати поточну кількість і список учасників.\n\n"
@@ -414,7 +464,7 @@ def build_help_text() -> str:
         "/autolike <кількість>\n"
         "Запустити автолайк в Дайвінчику вручну (1..20).\n\n"
         "Приклад:\n"
-        "/meeting сьогодні | Аркадія, 2 майданчик | волейбол\n"
+        "/meeting сьогодні | 19:30 | Аркадія, 2 майданчик | волейбол\n"
         "У групі голоси: +, + 19:00, йду 19:30, -\n"
         "/close 19:30\n"
         "/autolike 6"
@@ -427,6 +477,44 @@ async def sender_is_admin(chat, user_id: int) -> bool:
         return bool(getattr(perms, "is_creator", False) or getattr(perms, "is_admin", False))
     except Exception:
         return False
+
+
+async def expected_votes_for_target_chat(chat) -> int | None:
+    try:
+        count = 0
+        async for p in client.iter_participants(chat):
+            pid = int(getattr(p, "id", 0) or 0)
+            if pid == self_user_id:
+                continue
+            if getattr(p, "bot", False):
+                continue
+            count += 1
+        return count
+    except Exception as e:
+        print(f"Warning: cannot calculate expected votes: {e}", flush=True)
+        return None
+
+
+async def maybe_auto_finalize_meeting(chat, chat_key: str):
+    active_event = events_state.get(chat_key)
+    if not active_event or not active_event.get("is_open", True):
+        return
+
+    expected_votes = await expected_votes_for_target_chat(chat)
+    if expected_votes is None or expected_votes <= 0:
+        return
+
+    current_votes = len(active_event.get("participants", {}))
+    if current_votes < expected_votes:
+        return
+
+    active_event["is_open"] = False
+    events_state[chat_key] = active_event
+    state["events"] = events_state
+    save_state(state)
+
+    final_post = render_final_event_text(active_event, "")
+    await client.send_message(chat, "Збір закрито автоматично (проголосували всі).\n\n" + final_post)
 
 
 async def user_is_member_of_target_chat(user_id: int) -> bool:
@@ -610,6 +698,7 @@ events_state = state["events"]
 contacted_usernames = set(state.get("contacted_usernames", []))
 client = TelegramClient(StringSession(SESSION_STRING), API_ID, API_HASH)
 channel_entity = None
+self_user_id = 0
 last_bot_daiv_action_ts = 0
 daiv_auto_session = {"active": False, "done": 0, "target": 0, "started_ts": 0, "cooldown_until": 0}
 
@@ -663,7 +752,7 @@ async def handle_message(event):
                 if not invite_ok:
                     print(f"Warning: cannot add @{username} to target chat: {invite_status}", flush=True)
 
-                if username not in contacted_usernames:
+                if username not in contacted_usernames and invite_status != "already_member":
                     try:
                         dm_text = OUTREACH_TEXT
                         if invite_ok and invite_status == "invited":
@@ -754,6 +843,7 @@ async def handle_message(event):
                 "started_at_message_id": int(posted.id),
                 "topic": payload["topic"],
                 "date": payload["date"],
+                "time": payload["time"],
                 "place": payload["place"],
                 "participants": {},
             }
@@ -849,6 +939,7 @@ async def handle_message(event):
                 events_state[chat_key] = active_event
                 state["events"] = events_state
                 save_state(state)
+                await maybe_auto_finalize_meeting(chat, chat_key)
         return
 
     if not event.is_private:
@@ -943,7 +1034,7 @@ async def handle_message(event):
 
 
 async def main():
-    global channel_entity
+    global channel_entity, self_user_id
 
     print("Starting intro bot...", flush=True)
     await client.connect()
@@ -953,6 +1044,7 @@ async def main():
     channel_entity = await resolve_channel_entity_safe()
 
     me = await client.get_me()
+    self_user_id = int(getattr(me, "id", 0) or 0)
     print(f"Started as {me.id}", flush=True)
     print(f"Keywords: {', '.join(KEYWORDS)}", flush=True)
     print(f"Channel ref: {CHANNEL_REF}", flush=True)
