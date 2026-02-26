@@ -46,7 +46,6 @@ ADMIN_FINAL_COMMANDS = {"/final", "/підсумок"}
 USER_HELP_COMMANDS = {"/help", "/команди"}
 ADMIN_HELP_COMMANDS = {"/helpa", "/адмінка", "/adminhelp"}
 ADMIN_AUTOLIKE_COMMANDS = {"/autolike", "/лайкстарт"}
-AUTOLIKE_OWNER_ID = 1293715368
 MEETING_CREATE_USER_COOLDOWN_SEC = 5 * 60
 MEETING_CREATE_GLOBAL_COOLDOWN_SEC = 90
 ALL_ADMIN_COMMANDS = (
@@ -613,10 +612,10 @@ def build_admin_help_text() -> str:
         "Закрити і відправити фінал у групу.\n\n"
         "/final <час>\n"
         "Те саме, що /close.\n\n"
-        "4) Автолайк (тільки для OWNER):\n"
+        "4) Автолайк (тільки для акаунта сесії):\n"
         "/autolike <кількість>\n"
         "Запуск ручного автолайку в Дайвінчику (1..20).\n"
-        f"Дозволено тільки user_id={AUTOLIKE_OWNER_ID}.\n\n"
+        "Команду може виконати тільки той самий акаунт, на якому запущений SESSION_STRING.\n\n"
         "5) Довідка:\n"
         "/helpa\n"
         "Показати цю інструкцію."
@@ -1137,10 +1136,10 @@ async def handle_message(event):
             return
 
         if command in ADMIN_AUTOLIKE_COMMANDS:
-            if user_id != AUTOLIKE_OWNER_ID:
+            if user_id != self_user_id:
                 await client.send_message(
                     event.chat_id,
-                    f"/autolike доступна тільки OWNER user_id={AUTOLIKE_OWNER_ID}.",
+                    f"/autolike доступна тільки акаунту сесії (user_id={self_user_id}).",
                 )
                 return
             if not DAIVINCHIK_CHAT_ID:
