@@ -48,6 +48,7 @@ ADMIN_HELP_COMMANDS = {"/helpa", "/адмінка", "/adminhelp"}
 ADMIN_AUTOLIKE_COMMANDS = {"/autolike", "/лайкстарт"}
 MEETING_CREATE_USER_COOLDOWN_SEC = 5 * 60
 MEETING_CREATE_GLOBAL_COOLDOWN_SEC = 90
+MEETING_HISTORY_LIMIT = 30
 ALL_ADMIN_COMMANDS = (
     ADMIN_MEETING_COMMANDS
     | ADMIN_EDIT_COMMANDS
@@ -141,6 +142,7 @@ def load_state() -> dict:
                 "created_by_name": str(payload.get("created_by_name", "")),
                 "created_at_ts": int(payload.get("created_at_ts", 0) or 0),
                 "participants": {},
+                "declined": {},
             }
 
             participants = payload.get("participants", {})
@@ -152,6 +154,19 @@ def load_state() -> dict:
                     }
                 else:
                     event_item["participants"][str(uid)] = {
+                        "name": str(data_item),
+                        "time": "",
+                    }
+
+            declined = payload.get("declined", {})
+            for uid, data_item in declined.items():
+                if isinstance(data_item, dict):
+                    event_item["declined"][str(uid)] = {
+                        "name": str(data_item.get("name", uid)),
+                        "time": str(data_item.get("time", "")),
+                    }
+                else:
+                    event_item["declined"][str(uid)] = {
                         "name": str(data_item),
                         "time": "",
                     }
@@ -180,6 +195,7 @@ def load_state() -> dict:
                     "created_by_name": str(payload.get("created_by_name", "")),
                     "created_at_ts": int(payload.get("created_at_ts", 0) or 0),
                     "participants": {},
+                    "declined": {},
                 }
                 participants = payload.get("participants", {})
                 for uid, data_item in participants.items():
@@ -190,6 +206,15 @@ def load_state() -> dict:
                         }
                     else:
                         row["participants"][str(uid)] = {"name": str(data_item), "time": ""}
+                declined = payload.get("declined", {})
+                for uid, data_item in declined.items():
+                    if isinstance(data_item, dict):
+                        row["declined"][str(uid)] = {
+                            "name": str(data_item.get("name", uid)),
+                            "time": str(data_item.get("time", "")),
+                        }
+                    else:
+                        row["declined"][str(uid)] = {"name": str(data_item), "time": ""}
                 parsed_rows.append(row)
             history_map[str(chat_id)] = parsed_rows
 
@@ -270,6 +295,13 @@ def save_state(state: dict) -> None:
                 }
                 for uid, data_item in event_data.get("participants", {}).items()
             },
+            "declined": {
+                str(uid): {
+                    "name": str(data_item.get("name", uid)) if isinstance(data_item, dict) else str(data_item),
+                    "time": str(data_item.get("time", "")) if isinstance(data_item, dict) else "",
+                }
+                for uid, data_item in event_data.get("declined", {}).items()
+            },
         }
 
     for chat_id, rows in state.get("events_history", {}).items():
@@ -302,6 +334,15 @@ def save_state(state: dict) -> None:
                             "time": str(data_item.get("time", "")) if isinstance(data_item, dict) else "",
                         }
                         for uid, data_item in event_data.get("participants", {}).items()
+                    },
+                    "declined": {
+                        str(uid): {
+                            "name": str(data_item.get("name", uid))
+                            if isinstance(data_item, dict)
+                            else str(data_item),
+                            "time": str(data_item.get("time", "")) if isinstance(data_item, dict) else "",
+                        }
+                        for uid, data_item in event_data.get("declined", {}).items()
                     },
                 }
             )
@@ -515,6 +556,68 @@ def parse_meeting_payload(args: str) -> dict:
     return {"topic": args, "date": "Не вказано", "time": "Не вказано", "place": "Не вказано", "text": text}
 
 
+def render_active_meeting_text(event_data: dict) -> str:
+    topic = str(event_data.get("topic", "Зустріч"))
+    date = str(event_data.get("date", "Не вказано"))
+    time_value = str(event_data.get("time", "Не вказано"))
+    place = str(event_data.get("place", "Не вказано"))
+    meeting_id = int(event_data.get("meeting_id", 0) or 0)
+    participants = event_data.get("participants", {})
+    declined = event_data.get("declined", {})
+    yes_count = len(participants)
+    no_count = len(declined)
+    yes_names = []
+    no_names = []
+    for _, data_item in sorted(
+        participants.items(), key=lambda item: str(item[1].get("name", "")).lower()
+    ):
+        yes_names.append(str(data_item.get("name", "")).strip())
+    for _, data_item in sorted(
+        declined.items(), key=lambda item: str(item[1].get("name", "")).lower()
+    ):
+        no_names.append(str(data_item.get("name", "")).strip())
+
+    lines = [
+        f"ID збору: #{meeting_id}",
+        f"Збір: {topic}",
+        f"Дата: {date}",
+        f"Час (база): {time_value}",
+        f"Місце: {place}",
+        "",
+        "Голосуйте.",
+        "",
+        f"Вже йдуть: {yes_count}",
+        f"Не йдуть: {no_count}",
+    ]
+
+    if yes_count:
+        final_time = choose_final_time(event_data, "")
+        if final_time and final_time != "Не вказано":
+            lines.append(f"Топ час зараз: {final_time}")
+        if yes_count <= 5:
+            lines.append("")
+            lines.append("Йдуть:")
+            for idx, name in enumerate(yes_names, start=1):
+                lines.append(f"{idx}. {name}")
+        else:
+            recent_names = yes_names[-5:]
+            lines.append("")
+            lines.append("Останні: " + ", ".join(recent_names))
+
+    if no_count:
+        if no_count <= 5:
+            lines.append("")
+            lines.append("Не йдуть:")
+            for idx, name in enumerate(no_names, start=1):
+                lines.append(f"{idx}. {name}")
+        else:
+            recent_no_names = no_names[-5:]
+            lines.append("")
+            lines.append("Останні не йдуть: " + ", ".join(recent_no_names))
+
+    return "\n".join(lines)
+
+
 def choose_final_time(event_data: dict, fallback_time: str) -> str:
     meeting_time = str(event_data.get("time", "Не вказано")).strip() or "Не вказано"
     participant_times = []
@@ -555,10 +658,11 @@ def user_display_name(sender) -> str:
 
 def render_rsvp_summary(event_data: dict) -> str:
     participants = event_data.get("participants", {})
+    declined = event_data.get("declined", {})
     meeting_id = int(event_data.get("meeting_id", 0) or 0)
     meeting_prefix = f"ID збору: #{meeting_id}\n" if meeting_id else ""
-    if not participants:
-        return f"{meeting_prefix}Хто приходить: 0\n\nПоки що ніхто не підтвердив участь."
+    if not participants and not declined:
+        return f"{meeting_prefix}Хто приходить: 0\nНе йдуть: 0\n\nПоки що ніхто не проголосував."
 
     rows = []
     time_stats = {}
@@ -571,7 +675,7 @@ def render_rsvp_summary(event_data: dict) -> str:
         if time_hint:
             time_stats[time_hint] = time_stats.get(time_hint, 0) + 1
 
-    lines = [f"{meeting_prefix}Хто приходить: {len(rows)}", ""]
+    lines = [f"{meeting_prefix}Хто приходить: {len(rows)}", f"Не йдуть: {len(declined)}", ""]
     for idx, (name, time_hint) in enumerate(rows, start=1):
         if time_hint:
             lines.append(f"{idx}. {name} ({time_hint})")
@@ -583,6 +687,15 @@ def render_rsvp_summary(event_data: dict) -> str:
         lines.append("Часові пропозиції:")
         for time_value, count in sorted(time_stats.items(), key=lambda x: (-x[1], x[0])):
             lines.append(f"- {time_value}: {count}")
+
+    if declined:
+        lines.append("")
+        lines.append("Не йдуть:")
+        declined_rows = sorted(
+            declined.items(), key=lambda item: str(item[1].get("name", "")).lower()
+        )
+        for idx, (_, data_item) in enumerate(declined_rows, start=1):
+            lines.append(f"{idx}. {str(data_item.get('name', ''))}")
 
     return "\n".join(lines)
 
@@ -709,7 +822,7 @@ async def maybe_auto_finalize_meeting(chat, chat_key: str):
     if expected_votes is None or expected_votes <= 0:
         return
 
-    current_votes = len(active_event.get("participants", {}))
+    current_votes = len(active_event.get("participants", {})) + len(active_event.get("declined", {}))
     if current_votes < expected_votes:
         return
 
@@ -735,6 +848,7 @@ def archive_event(chat_key: str, event_data: dict) -> None:
             break
     if not updated:
         rows.append(event_data)
+    rows = sorted(rows, key=lambda x: int(x.get("meeting_id", 0) or 0), reverse=True)[:MEETING_HISTORY_LIMIT]
     history[chat_key] = rows
     state["events_history"] = history
 
@@ -917,21 +1031,38 @@ async def apply_vote_to_active_meeting(
     if not active_event or not active_event.get("is_open", True):
         return False
     participants = active_event.get("participants", {})
+    declined = active_event.get("declined", {})
     uid = str(user_id)
     if vote == "yes":
         old_time = ""
         if uid in participants and isinstance(participants[uid], dict):
             old_time = str(participants[uid].get("time", "")).strip()
+        declined.pop(uid, None)
         participants[uid] = {
             "name": display_name or user_display_name(sender),
             "time": time_hint.strip() or old_time,
         }
     else:
         participants.pop(uid, None)
+        declined[uid] = {
+            "name": display_name or user_display_name(sender),
+            "time": "",
+        }
     active_event["participants"] = participants
+    active_event["declined"] = declined
     events_state[chat_key] = active_event
     state["events"] = events_state
     save_state(state)
+    try:
+        await edit_meeting_message(
+            chat,
+            int(active_event.get("message_id", 0) or 0),
+            render_active_meeting_text(active_event),
+            int(active_event.get("meeting_id", 0) or 0),
+            int(active_event.get("bot_message_id", 0) or 0),
+        )
+    except Exception as e:
+        print(f"Warning: cannot refresh meeting post after vote: {e}", flush=True)
     await maybe_auto_finalize_meeting(chat, chat_key)
     return True
 
@@ -1301,15 +1432,12 @@ async def handle_message(event):
             payload = parse_meeting_payload(command_args)
             meeting_id = int(state.get("next_meeting_id", 1) or 1)
             state["next_meeting_id"] = meeting_id + 1
-            post_text = f"ID збору: #{meeting_id}\n{payload['text']}"
-            posted = await post_meeting_message(target_chat, post_text, meeting_id)
-            bot_msg_id = int(getattr(posted, "bot_id", 0) or 0)
-            events_state[target_chat_key] = {
-                "message_id": int(posted.id),
-                "bot_message_id": bot_msg_id,
-                "bot_post_via_api": bool(bot_msg_id > 0),
+            event_data = {
+                "message_id": 0,
+                "bot_message_id": 0,
+                "bot_post_via_api": False,
                 "is_open": True,
-                "started_at_message_id": int(posted.id),
+                "started_at_message_id": 0,
                 "topic": payload["topic"],
                 "date": payload["date"],
                 "time": payload["time"],
@@ -1319,7 +1447,16 @@ async def handle_message(event):
                 "created_by_name": user_display_name(sender),
                 "created_at_ts": now_ts,
                 "participants": {},
+                "declined": {},
             }
+            post_text = render_active_meeting_text(event_data)
+            posted = await post_meeting_message(target_chat, post_text, meeting_id)
+            bot_msg_id = int(getattr(posted, "bot_id", 0) or 0)
+            event_data["message_id"] = int(posted.id)
+            event_data["bot_message_id"] = bot_msg_id
+            event_data["bot_post_via_api"] = bool(bot_msg_id > 0)
+            event_data["started_at_message_id"] = int(posted.id)
+            events_state[target_chat_key] = event_data
             state["events"] = events_state
             state["meeting_last_create_ts"] = now_ts
             creator_last[str(user_id)] = now_ts
@@ -1330,7 +1467,17 @@ async def handle_message(event):
 
         if command in ADMIN_PREVIEW_COMMANDS:
             payload = parse_meeting_payload(command_args)
-            preview_text = f"ID збору: #preview\n{payload['text']}"
+            preview_text = render_active_meeting_text(
+                {
+                    "topic": payload["topic"],
+                    "date": payload["date"],
+                    "time": payload["time"],
+                    "place": payload["place"],
+                    "meeting_id": 0,
+                    "participants": {},
+                    "declined": {},
+                }
+            ).replace("#0", "#preview")
             await post_meeting_message(event.chat_id, preview_text, 0)
             return
 
@@ -1364,7 +1511,7 @@ async def handle_message(event):
             active_event["date"] = payload["date"]
             active_event["time"] = payload["time"]
             active_event["place"] = payload["place"]
-            post_text = f"ID збору: #{active_id}\n{payload['text']}"
+            post_text = render_active_meeting_text(active_event)
             try:
                 await edit_meeting_message(
                     target_chat,
