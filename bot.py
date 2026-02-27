@@ -64,6 +64,9 @@ NO_MARKERS = {"-", "-1", "не йду", "не буду"}
 MEETING_BTN_YES = "✅ Йду"
 MEETING_BTN_NO = "❌ Не йду"
 MEETING_BTN_TIME = "🕒 Пропоную час"
+MEETING_CB_YES = b"meeting:yes"
+MEETING_CB_NO = b"meeting:no"
+MEETING_CB_TIME = b"meeting:time"
 
 DAIVINCHIK_LIKES_RE = re.compile(r"Ти сподобався\s*(\d+)\s*дівчинам, показати їх\?", re.IGNORECASE)
 DAIVINCHIK_PROFILE_LIKED_TEXT = "Комусь сподобалась твоя анкета"
@@ -783,8 +786,8 @@ def render_meetings_list(chat_key: str) -> str:
 
 def meeting_buttons():
     return [
-        [Button.text(MEETING_BTN_YES), Button.text(MEETING_BTN_NO)],
-        [Button.text(MEETING_BTN_TIME)],
+        [Button.inline(MEETING_BTN_YES, MEETING_CB_YES), Button.inline(MEETING_BTN_NO, MEETING_CB_NO)],
+        [Button.inline(MEETING_BTN_TIME, MEETING_CB_TIME)],
     ]
 
 
@@ -802,6 +805,30 @@ async def edit_meeting_message(chat, message_id: int, text: str):
     except Exception as e:
         print(f"Warning: cannot edit meeting with buttons, fallback to plain text: {e}", flush=True)
         await client.edit_message(chat, message=message_id, text=text)
+
+
+async def apply_vote_to_active_meeting(chat, chat_key: str, user_id: int, sender, vote: str, time_hint: str = ""):
+    active_event = events_state.get(chat_key)
+    if not active_event or not active_event.get("is_open", True):
+        return False
+    participants = active_event.get("participants", {})
+    uid = str(user_id)
+    if vote == "yes":
+        old_time = ""
+        if uid in participants and isinstance(participants[uid], dict):
+            old_time = str(participants[uid].get("time", "")).strip()
+        participants[uid] = {
+            "name": user_display_name(sender),
+            "time": time_hint.strip() or old_time,
+        }
+    else:
+        participants.pop(uid, None)
+    active_event["participants"] = participants
+    events_state[chat_key] = active_event
+    state["events"] = events_state
+    save_state(state)
+    await maybe_auto_finalize_meeting(chat, chat_key)
+    return True
 
 
 async def user_is_member_of_target_chat(user_id: int) -> bool:
@@ -1361,20 +1388,7 @@ async def handle_message(event):
                 await client.send_message(chat, "Напиши реплаєм у форматі: + 16:30", reply_to=event.message.id)
                 return
             if vote and (is_reply_vote or is_after_start):
-                participants = active_event.get("participants", {})
-                uid = str(user_id)
-                if vote == "yes":
-                    participants[uid] = {
-                        "name": user_display_name(sender),
-                        "time": extract_time_hint(text),
-                    }
-                else:
-                    participants.pop(uid, None)
-                active_event["participants"] = participants
-                events_state[chat_key] = active_event
-                state["events"] = events_state
-                save_state(state)
-                await maybe_auto_finalize_meeting(chat, chat_key)
+                await apply_vote_to_active_meeting(chat, chat_key, user_id, sender, vote, extract_time_hint(text))
         return
 
     if not event.is_private:
@@ -1466,6 +1480,54 @@ async def handle_message(event):
     state["awaiting_intro_users"] = sorted(awaiting_intro_users)
     state["intro_name_tries"] = intro_name_tries
     save_state(state)
+
+
+@client.on(events.CallbackQuery())
+async def handle_callback(event):
+    data = bytes(event.data or b"")
+    if data not in {MEETING_CB_YES, MEETING_CB_NO, MEETING_CB_TIME}:
+        return
+
+    sender = await event.get_sender()
+    user_id = int(event.sender_id or 0)
+
+    if not (event.is_group or event.is_channel):
+        if data == MEETING_CB_TIME:
+            await event.answer("Напиши реплаєм: + 16:30", alert=True)
+        else:
+            await event.answer("Це тест/прев'ю кнопок у приваті.", alert=False)
+        return
+
+    chat = await event.get_chat()
+    chat_id = int(getattr(chat, "id", 0) or 0)
+    target_chat_id = int(getattr(channel_entity, "id", 0) or 0) if channel_entity is not None else 0
+    if target_chat_id == 0 or chat_id != target_chat_id:
+        await event.answer("Нецільовий чат.", alert=True)
+        return
+
+    chat_key = str(chat_id)
+    active_event = events_state.get(chat_key)
+    if not active_event or not active_event.get("is_open", True):
+        await event.answer("Активний збір вже закрито.", alert=True)
+        return
+
+    active_msg_id = int(active_event.get("message_id", 0) or 0)
+    callback_msg_id = int(getattr(event, "message_id", 0) or 0)
+    if active_msg_id and callback_msg_id and callback_msg_id != active_msg_id:
+        await event.answer("Це кнопка старого збору.", alert=True)
+        return
+
+    if data == MEETING_CB_TIME:
+        await event.answer("Відповідай реплаєм на пост: + 16:30", alert=True)
+        return
+
+    vote = "yes" if data == MEETING_CB_YES else "no"
+    ok = await apply_vote_to_active_meeting(chat, chat_key, user_id, sender, vote, "")
+    if not ok:
+        await event.answer("Не вдалося зарахувати голос.", alert=True)
+        return
+
+    await event.answer("Голос зараховано.")
 
 
 async def main():
