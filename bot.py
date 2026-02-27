@@ -38,6 +38,7 @@ MEETING_TEXT_FALLBACK = (
 )
 ADMIN_MEETING_COMMANDS = {"/meeting", "/discuss", "/збір", "/обговорення"}
 ADMIN_EDIT_COMMANDS = {"/editmeeting", "/редзбір"}
+ADMIN_PREVIEW_COMMANDS = {"/previewmeeting", "/preview", "/тестзбір"}
 ADMIN_WHO_COMMANDS = {"/who", "/rsvp", "/хто"}
 ADMIN_LIST_COMMANDS = {"/meetings", "/list", "/список"}
 ADMIN_CLOSE_COMMANDS = {"/close", "/закрити"}
@@ -50,6 +51,7 @@ MEETING_CREATE_GLOBAL_COOLDOWN_SEC = 90
 ALL_ADMIN_COMMANDS = (
     ADMIN_MEETING_COMMANDS
     | ADMIN_EDIT_COMMANDS
+    | ADMIN_PREVIEW_COMMANDS
     | ADMIN_WHO_COMMANDS
     | ADMIN_LIST_COMMANDS
     | ADMIN_CLOSE_COMMANDS
@@ -617,6 +619,8 @@ def build_user_help_text() -> str:
         "Доступно всім учасникам групи (є антифлуд).\n"
         "У <текст> пиши вид активності + за бажанням короткий опис.\n"
         "Приклад: футбол 5x5, легка гра без жорсткого контакту.\n\n"
+        "/previewmeeting <дата> | <час> | <місце> | <текст>\n"
+        "Показати тестовий вигляд поста з кнопками в приваті.\n\n"
         "/editmeeting <id> | <дата> | <час> | <місце> | <текст>\n"
         "Редагувати активний збір за ID без створення нового.\n\n"
         "Для повної адмін-довідки: /helpa"
@@ -635,6 +639,8 @@ def build_admin_help_text() -> str:
         "1.1) Редагувати активний збір:\n"
         "/editmeeting <id> | <дата> | <час> | <місце> | <текст>\n"
         "Приклад: /editmeeting 12 | сьогодні | 18:30 | Аркадія | волейбол + новачки welcome\n\n"
+        "1.2) Тест-перегляд у приваті:\n"
+        "/previewmeeting <дата> | <час> | <місце> | <текст>\n\n"
         "2) Перегляд голосування:\n"
         "/who\n"
         "Поточний активний збір.\n\n"
@@ -1185,6 +1191,12 @@ async def handle_message(event):
             state["meeting_creator_last_ts"] = creator_last
             save_state(state)
             await client.send_message(event.chat_id, f"Збір #{meeting_id} створено.")
+            return
+
+        if command in ADMIN_PREVIEW_COMMANDS:
+            payload = parse_meeting_payload(command_args)
+            preview_text = f"ID збору: #preview\n{payload['text']}"
+            await post_meeting_message(event.chat_id, preview_text)
             return
 
         if command in ADMIN_EDIT_COMMANDS:
