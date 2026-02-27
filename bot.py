@@ -6,6 +6,7 @@ import random
 import re
 import time
 from pathlib import Path
+from urllib import parse, request
 
 from telethon import Button, TelegramClient, events
 from telethon.errors import UserNotParticipantError
@@ -28,6 +29,8 @@ PROCESS_ONCE = os.getenv("PROCESS_ONCE", "1").strip() == "1"
 TEST_USER_ID = int(os.getenv("TEST_USER_ID", "0"))
 DAIVINCHIK_CHAT_ID_RAW = "1234060895"
 DAIVINCHIK_CHAT_ID = int(DAIVINCHIK_CHAT_ID_RAW)
+BOT_TOKEN = os.getenv("BOT_TOKEN", "").strip()
+BOT_API_BASE = f"https://api.telegram.org/bot{BOT_TOKEN}" if BOT_TOKEN else ""
 
 MEETING_TEXT_FALLBACK = (
     "Ну що, збираємось?\n"
@@ -64,9 +67,6 @@ NO_MARKERS = {"-", "-1", "не йду", "не буду"}
 MEETING_BTN_YES = "✅ Йду"
 MEETING_BTN_NO = "❌ Не йду"
 MEETING_BTN_TIME = "🕒 Пропоную час"
-MEETING_CB_YES = b"meeting:yes"
-MEETING_CB_NO = b"meeting:no"
-MEETING_CB_TIME = b"meeting:time"
 
 DAIVINCHIK_LIKES_RE = re.compile(r"Ти сподобався\s*(\d+)\s*дівчинам, показати їх\?", re.IGNORECASE)
 DAIVINCHIK_PROFILE_LIKED_TEXT = "Комусь сподобалась твоя анкета"
@@ -117,6 +117,7 @@ def load_state() -> dict:
             "next_meeting_id": 1,
             "meeting_last_create_ts": 0,
             "meeting_creator_last_ts": {},
+            "tg_bot_update_offset": 0,
         }
     try:
         data = json.loads(STATE_FILE.read_text(encoding="utf-8"))
@@ -130,6 +131,8 @@ def load_state() -> dict:
             msg_id = int(payload.get("message_id", 0))
             event_item = {
                 "message_id": msg_id,
+                "bot_message_id": int(payload.get("bot_message_id", 0) or 0),
+                "bot_post_via_api": bool(payload.get("bot_post_via_api", False)),
                 "is_open": bool(payload.get("is_open", True)),
                 "started_at_message_id": int(payload.get("started_at_message_id", msg_id)),
                 "topic": str(payload.get("topic", "Зустріч")),
@@ -167,6 +170,8 @@ def load_state() -> dict:
                 msg_id = int(payload.get("message_id", 0))
                 row = {
                     "message_id": msg_id,
+                    "bot_message_id": int(payload.get("bot_message_id", 0) or 0),
+                    "bot_post_via_api": bool(payload.get("bot_post_via_api", False)),
                     "is_open": bool(payload.get("is_open", False)),
                     "started_at_message_id": int(payload.get("started_at_message_id", msg_id)),
                     "topic": str(payload.get("topic", "Зустріч")),
@@ -205,6 +210,7 @@ def load_state() -> dict:
             "meeting_creator_last_ts": {
                 str(k): int(v) for k, v in data.get("meeting_creator_last_ts", {}).items()
             },
+            "tg_bot_update_offset": int(data.get("tg_bot_update_offset", 0) or 0),
         }
     except Exception:
         return {
@@ -219,6 +225,7 @@ def load_state() -> dict:
             "next_meeting_id": 1,
             "meeting_last_create_ts": 0,
             "meeting_creator_last_ts": {},
+            "tg_bot_update_offset": 0,
         }
 
 
@@ -239,11 +246,14 @@ def save_state(state: dict) -> None:
         "meeting_creator_last_ts": {
             str(k): int(v) for k, v in state.get("meeting_creator_last_ts", {}).items()
         },
+        "tg_bot_update_offset": int(state.get("tg_bot_update_offset", 0) or 0),
     }
 
     for chat_id, event_data in state.get("events", {}).items():
         payload["events"][str(chat_id)] = {
             "message_id": int(event_data.get("message_id", 0)),
+            "bot_message_id": int(event_data.get("bot_message_id", 0) or 0),
+            "bot_post_via_api": bool(event_data.get("bot_post_via_api", False)),
             "is_open": bool(event_data.get("is_open", True)),
             "started_at_message_id": int(
                 event_data.get("started_at_message_id", event_data.get("message_id", 0))
@@ -273,6 +283,8 @@ def save_state(state: dict) -> None:
             safe_rows.append(
                 {
                     "message_id": int(event_data.get("message_id", 0)),
+                    "bot_message_id": int(event_data.get("bot_message_id", 0) or 0),
+                    "bot_post_via_api": bool(event_data.get("bot_post_via_api", False)),
                     "is_open": bool(event_data.get("is_open", False)),
                     "started_at_message_id": int(
                         event_data.get("started_at_message_id", event_data.get("message_id", 0))
@@ -784,14 +796,98 @@ def render_meetings_list(chat_key: str) -> str:
     return "\n".join(lines)
 
 
+def meeting_inline_markup(meeting_id: int) -> dict:
+    return {
+        "inline_keyboard": [
+            [
+                {"text": MEETING_BTN_YES, "callback_data": f"m:{meeting_id}:yes"},
+                {"text": MEETING_BTN_NO, "callback_data": f"m:{meeting_id}:no"},
+            ],
+            [
+                {"text": MEETING_BTN_TIME, "callback_data": f"m:{meeting_id}:time"},
+            ],
+        ]
+    }
+
+
+def bot_api_call(method: str, params: dict | None = None) -> dict | None:
+    if not BOT_API_BASE:
+        return None
+    payload = params or {}
+    data = parse.urlencode(payload).encode("utf-8")
+    req = request.Request(
+        f"{BOT_API_BASE}/{method}",
+        data=data,
+        headers={"Content-Type": "application/x-www-form-urlencoded"},
+        method="POST",
+    )
+    try:
+        with request.urlopen(req, timeout=40) as resp:
+            body = resp.read().decode("utf-8", errors="replace")
+        parsed = json.loads(body)
+        if not parsed.get("ok", False):
+            return None
+        return parsed
+    except Exception:
+        return None
+
+
+async def bot_api_call_async(method: str, params: dict | None = None) -> dict | None:
+    return await asyncio.to_thread(bot_api_call, method, params)
+
+
+def callback_display_name(user_obj: dict) -> str:
+    username = str(user_obj.get("username", "") or "").strip()
+    if username:
+        return f"@{username}"
+    first_name = str(user_obj.get("first_name", "") or "").strip()
+    last_name = str(user_obj.get("last_name", "") or "").strip()
+    full = " ".join(x for x in [first_name, last_name] if x).strip()
+    return full or str(user_obj.get("id", "unknown"))
+
+
+def resolve_bot_chat_id(chat_obj) -> str:
+    if isinstance(chat_obj, int):
+        cid = int(chat_obj)
+    else:
+        cid = int(getattr(chat_obj, "id", 0) or 0) if chat_obj is not None else 0
+    target_id = int(getattr(channel_entity, "id", 0) or 0) if channel_entity is not None else 0
+    if cid and target_id and cid == target_id:
+        return str(CHANNEL_ID_RAW)
+    return str(cid)
+
+
 def meeting_buttons():
     return [
-        [Button.inline(MEETING_BTN_YES, MEETING_CB_YES), Button.inline(MEETING_BTN_NO, MEETING_CB_NO)],
-        [Button.inline(MEETING_BTN_TIME, MEETING_CB_TIME)],
+        [Button.text(MEETING_BTN_YES), Button.text(MEETING_BTN_NO)],
+        [Button.text(MEETING_BTN_TIME)],
     ]
 
 
-async def post_meeting_message(chat, text: str):
+async def post_meeting_message(chat, text: str, meeting_id: int):
+    if isinstance(chat, int):
+        chat_id = int(chat)
+    else:
+        chat_id = int(getattr(chat, "id", 0) or 0) if chat is not None else 0
+    if BOT_TOKEN and chat_id:
+        bot_chat_id = resolve_bot_chat_id(chat)
+        res = await bot_api_call_async(
+            "sendMessage",
+            {
+                "chat_id": bot_chat_id,
+                "text": text,
+                "reply_markup": json.dumps(meeting_inline_markup(meeting_id), ensure_ascii=False),
+            },
+        )
+        if res and isinstance(res.get("result"), dict):
+            msg_id = int(res["result"].get("message_id", 0) or 0)
+            if msg_id > 0:
+                class _Sent:  # tiny adapter to keep existing call-sites
+                    id = msg_id
+                    bot_id = msg_id
+                    via_bot_api = True
+
+                return _Sent()
     try:
         return await client.send_message(chat, text, buttons=meeting_buttons())
     except Exception as e:
@@ -799,7 +895,20 @@ async def post_meeting_message(chat, text: str):
         return await client.send_message(chat, text)
 
 
-async def edit_meeting_message(chat, message_id: int, text: str):
+async def edit_meeting_message(chat, message_id: int, text: str, meeting_id: int, bot_message_id: int = 0):
+    if BOT_TOKEN and bot_message_id > 0:
+        bot_chat_id = resolve_bot_chat_id(chat)
+        ok = await bot_api_call_async(
+            "editMessageText",
+            {
+                "chat_id": bot_chat_id,
+                "message_id": str(bot_message_id),
+                "text": text,
+                "reply_markup": json.dumps(meeting_inline_markup(meeting_id), ensure_ascii=False),
+            },
+        )
+        if ok:
+            return
     try:
         await client.edit_message(chat, message=message_id, text=text, buttons=meeting_buttons())
     except Exception as e:
@@ -807,7 +916,15 @@ async def edit_meeting_message(chat, message_id: int, text: str):
         await client.edit_message(chat, message=message_id, text=text)
 
 
-async def apply_vote_to_active_meeting(chat, chat_key: str, user_id: int, sender, vote: str, time_hint: str = ""):
+async def apply_vote_to_active_meeting(
+    chat,
+    chat_key: str,
+    user_id: int,
+    sender,
+    vote: str,
+    time_hint: str = "",
+    display_name: str = "",
+):
     active_event = events_state.get(chat_key)
     if not active_event or not active_event.get("is_open", True):
         return False
@@ -818,7 +935,7 @@ async def apply_vote_to_active_meeting(chat, chat_key: str, user_id: int, sender
         if uid in participants and isinstance(participants[uid], dict):
             old_time = str(participants[uid].get("time", "")).strip()
         participants[uid] = {
-            "name": user_display_name(sender),
+            "name": display_name or user_display_name(sender),
             "time": time_hint.strip() or old_time,
         }
     else:
@@ -1197,9 +1314,12 @@ async def handle_message(event):
             meeting_id = int(state.get("next_meeting_id", 1) or 1)
             state["next_meeting_id"] = meeting_id + 1
             post_text = f"ID збору: #{meeting_id}\n{payload['text']}"
-            posted = await post_meeting_message(target_chat, post_text)
+            posted = await post_meeting_message(target_chat, post_text, meeting_id)
+            bot_msg_id = int(getattr(posted, "bot_id", 0) or 0)
             events_state[target_chat_key] = {
                 "message_id": int(posted.id),
+                "bot_message_id": bot_msg_id,
+                "bot_post_via_api": bool(bot_msg_id > 0),
                 "is_open": True,
                 "started_at_message_id": int(posted.id),
                 "topic": payload["topic"],
@@ -1223,7 +1343,7 @@ async def handle_message(event):
         if command in ADMIN_PREVIEW_COMMANDS:
             payload = parse_meeting_payload(command_args)
             preview_text = f"ID збору: #preview\n{payload['text']}"
-            await post_meeting_message(event.chat_id, preview_text)
+            await post_meeting_message(event.chat_id, preview_text, 0)
             return
 
         if command in ADMIN_EDIT_COMMANDS:
@@ -1262,6 +1382,8 @@ async def handle_message(event):
                     target_chat,
                     int(active_event.get("message_id", 0) or 0),
                     post_text,
+                    active_id,
+                    int(active_event.get("bot_message_id", 0) or 0),
                 )
             except Exception as e:
                 await client.send_message(event.chat_id, f"Не вдалося оновити пост збору: {e}")
@@ -1365,6 +1487,7 @@ async def handle_message(event):
         if command in (
             ADMIN_MEETING_COMMANDS
             | ADMIN_EDIT_COMMANDS
+            | ADMIN_PREVIEW_COMMANDS
             | ADMIN_FINAL_COMMANDS
             | ADMIN_WHO_COMMANDS
             | ADMIN_CLOSE_COMMANDS
@@ -1482,52 +1605,134 @@ async def handle_message(event):
     save_state(state)
 
 
-@client.on(events.CallbackQuery())
-async def handle_callback(event):
-    data = bytes(event.data or b"")
-    if data not in {MEETING_CB_YES, MEETING_CB_NO, MEETING_CB_TIME}:
+def parse_meeting_callback_data(data: str):
+    # m:<meeting_id>:<yes|no|time>
+    parts = data.split(":")
+    if len(parts) != 3 or parts[0] != "m":
+        return None, None
+    if not parts[1].isdigit():
+        return None, None
+    action = parts[2]
+    if action not in {"yes", "no", "time"}:
+        return None, None
+    return int(parts[1]), action
+
+
+async def process_bot_callback_update(update_item: dict):
+    callback = update_item.get("callback_query", {})
+    if not isinstance(callback, dict):
+        return
+    callback_id = str(callback.get("id", "") or "")
+    data = str(callback.get("data", "") or "")
+    meeting_id, action = parse_meeting_callback_data(data)
+    if meeting_id is None:
         return
 
-    sender = await event.get_sender()
-    user_id = int(event.sender_id or 0)
+    from_obj = callback.get("from", {}) or {}
+    user_id = int(from_obj.get("id", 0) or 0)
+    message = callback.get("message", {}) or {}
+    chat = message.get("chat", {}) or {}
+    chat_id = int(chat.get("id", 0) or 0)
+    message_id = int(message.get("message_id", 0) or 0)
 
-    if not (event.is_group or event.is_channel):
-        if data == MEETING_CB_TIME:
-            await event.answer("Напиши реплаєм: + 16:30", alert=True)
-        else:
-            await event.answer("Це тест/прев'ю кнопок у приваті.", alert=False)
-        return
-
-    chat = await event.get_chat()
-    chat_id = int(getattr(chat, "id", 0) or 0)
-    target_chat_id = int(getattr(channel_entity, "id", 0) or 0) if channel_entity is not None else 0
+    target_chat_id = int(CHANNEL_ID_RAW) if str(CHANNEL_ID_RAW).startswith("-") else 0
     if target_chat_id == 0 or chat_id != target_chat_id:
-        await event.answer("Нецільовий чат.", alert=True)
+        if callback_id:
+            await bot_api_call_async("answerCallbackQuery", {"callback_query_id": callback_id, "text": "Нецільовий чат."})
         return
 
-    chat_key = str(chat_id)
+    if channel_entity is None:
+        if callback_id:
+            await bot_api_call_async(
+                "answerCallbackQuery",
+                {"callback_query_id": callback_id, "text": "Чат не ініціалізовано.", "show_alert": "true"},
+            )
+        return
+    chat_key = str(int(getattr(channel_entity, "id", 0) or 0))
     active_event = events_state.get(chat_key)
     if not active_event or not active_event.get("is_open", True):
-        await event.answer("Активний збір вже закрито.", alert=True)
+        if callback_id:
+            await bot_api_call_async(
+                "answerCallbackQuery",
+                {"callback_query_id": callback_id, "text": "Активний збір вже закрито.", "show_alert": "true"},
+            )
         return
 
-    active_msg_id = int(active_event.get("message_id", 0) or 0)
-    callback_msg_id = int(getattr(event, "message_id", 0) or 0)
-    if active_msg_id and callback_msg_id and callback_msg_id != active_msg_id:
-        await event.answer("Це кнопка старого збору.", alert=True)
+    active_id = int(active_event.get("meeting_id", 0) or 0)
+    if active_id != meeting_id:
+        if callback_id:
+            await bot_api_call_async(
+                "answerCallbackQuery",
+                {"callback_query_id": callback_id, "text": "Це кнопка старого збору.", "show_alert": "true"},
+            )
         return
 
-    if data == MEETING_CB_TIME:
-        await event.answer("Відповідай реплаєм на пост: + 16:30", alert=True)
+    bot_msg_id = int(active_event.get("bot_message_id", 0) or 0)
+    if bot_msg_id and message_id and bot_msg_id != message_id:
+        if callback_id:
+            await bot_api_call_async(
+                "answerCallbackQuery",
+                {"callback_query_id": callback_id, "text": "Це кнопка іншого поста.", "show_alert": "true"},
+            )
         return
 
-    vote = "yes" if data == MEETING_CB_YES else "no"
-    ok = await apply_vote_to_active_meeting(chat, chat_key, user_id, sender, vote, "")
-    if not ok:
-        await event.answer("Не вдалося зарахувати голос.", alert=True)
+    if action == "time":
+        if callback_id:
+            await bot_api_call_async(
+                "answerCallbackQuery",
+                {"callback_query_id": callback_id, "text": "Відповідай реплаєм: + 16:30", "show_alert": "true"},
+            )
         return
 
-    await event.answer("Голос зараховано.")
+    vote = "yes" if action == "yes" else "no"
+    display = callback_display_name(from_obj)
+    ok = await apply_vote_to_active_meeting(
+        channel_entity,
+        chat_key,
+        user_id,
+        None,
+        vote,
+        "",
+        display_name=display,
+    )
+    if callback_id:
+        if ok:
+            await bot_api_call_async("answerCallbackQuery", {"callback_query_id": callback_id, "text": "Голос зараховано."})
+        else:
+            await bot_api_call_async(
+                "answerCallbackQuery",
+                {"callback_query_id": callback_id, "text": "Не вдалося зарахувати голос.", "show_alert": "true"},
+            )
+
+
+async def bot_callback_worker():
+    if not BOT_TOKEN:
+        return
+    while True:
+        try:
+            offset = int(state.get("tg_bot_update_offset", 0) or 0)
+            payload = {
+                "timeout": "25",
+                "allowed_updates": json.dumps(["callback_query"]),
+            }
+            if offset > 0:
+                payload["offset"] = str(offset)
+            res = await bot_api_call_async("getUpdates", payload)
+            if not res:
+                await asyncio.sleep(2)
+                continue
+            updates = res.get("result", []) if isinstance(res, dict) else []
+            if not isinstance(updates, list):
+                updates = []
+            for upd in updates:
+                upd_id = int(upd.get("update_id", 0) or 0)
+                if upd_id > 0:
+                    state["tg_bot_update_offset"] = upd_id + 1
+                await process_bot_callback_update(upd)
+            save_state(state)
+        except Exception as e:
+            print(f"Warning: bot callback worker error: {e}", flush=True)
+            await asyncio.sleep(2)
 
 
 async def main():
@@ -1550,10 +1755,13 @@ async def main():
     print(f"Process once: {PROCESS_ONCE}", flush=True)
     print(f"Daiv chat id (raw): {DAIVINCHIK_CHAT_ID_RAW}", flush=True)
     print(f"Daiv chat id (parsed): {DAIVINCHIK_CHAT_ID}", flush=True)
+    print(f"Bot token configured: {bool(BOT_TOKEN)}", flush=True)
     if DAIVINCHIK_CHAT_ID:
         print(f"Next daiv auto run ts: {int(state.get('next_auto_daiv_ts', 0) or 0)}", flush=True)
 
     client.loop.create_task(daiv_auto_worker())
+    if BOT_TOKEN:
+        client.loop.create_task(bot_callback_worker())
 
     await client(UpdateStatusRequest(offline=True))
     await client.run_until_disconnected()
