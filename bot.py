@@ -34,10 +34,7 @@ BOT_API_BASE = f"https://api.telegram.org/bot{BOT_TOKEN}" if BOT_TOKEN else ""
 
 MEETING_TEXT_FALLBACK = (
     "Ну що, збираємось?\n"
-    "Голосуйте.\n"
-    "Відповідайте реплаєм на це повідомлення:\n"
-    "+ або + 16:00 якщо будете\n"
-    "- якщо не будете"
+    "Голосуйте."
 )
 ADMIN_MEETING_COMMANDS = {"/meeting", "/discuss", "/збір", "/обговорення"}
 ADMIN_EDIT_COMMANDS = {"/editmeeting", "/редзбір"}
@@ -489,10 +486,7 @@ def parse_meeting_payload(args: str) -> dict:
             f"Дата: {date}\n"
             f"Час (база): {time_value}\n"
             f"Місце: {place}\n\n"
-            "Голосуйте.\n"
-            "Відповідайте реплаєм на це повідомлення:\n"
-            "+ або + 16:00 якщо будете\n"
-            "- якщо не будете"
+            "Голосуйте."
         )
         return {"topic": topic, "date": date, "time": time_value, "place": place, "text": text}
 
@@ -507,10 +501,7 @@ def parse_meeting_payload(args: str) -> dict:
             f"Дата: {date}\n"
             f"Час (база): {time_value}\n"
             f"Місце: {place}\n\n"
-            "Голосуйте.\n"
-            "Відповідайте реплаєм на це повідомлення:\n"
-            "+ або + 16:00 якщо будете\n"
-            "- якщо не будете"
+            "Голосуйте."
         )
         return {"topic": topic, "date": date, "time": time_value, "place": place, "text": text}
 
@@ -519,10 +510,7 @@ def parse_meeting_payload(args: str) -> dict:
         "Дата: Не вказано\n"
         "Час (база): Не вказано\n"
         "Місце: Не вказано\n\n"
-        "Голосуйте.\n"
-        "Відповідайте реплаєм на це повідомлення:\n"
-        "+ або + 16:00 якщо будете\n"
-        "- якщо не будете"
+        "Голосуйте."
     )
     return {"topic": args, "date": "Не вказано", "time": "Не вказано", "place": "Не вказано", "text": text}
 
