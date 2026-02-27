@@ -31,16 +31,14 @@ DAIVINCHIK_CHAT_ID = int(DAIVINCHIK_CHAT_ID_RAW)
 
 MEETING_TEXT_FALLBACK = (
     "Ну що, збираємось?\n"
-    "Голосуйте, хто може прийти.\n"
+    "Голосуйте.\n"
     "Відповідайте реплаєм на це повідомлення:\n"
-    "+ або + 19:00 якщо будете\n"
-    "- якщо не будете\n\n"
-    "Якщо час не підходить — пропонуйте свій у форматі “+ 14:30”.\n"
-    "Будь хитрим лисом 😁\n"
-    "Будьте активними 😜"
+    "+ або + 16:00 якщо будете\n"
+    "- якщо не будете"
 )
 ADMIN_MEETING_COMMANDS = {"/meeting", "/discuss", "/збір", "/обговорення"}
 ADMIN_WHO_COMMANDS = {"/who", "/rsvp", "/хто"}
+ADMIN_LIST_COMMANDS = {"/meetings", "/list", "/список"}
 ADMIN_CLOSE_COMMANDS = {"/close", "/закрити"}
 ADMIN_FINAL_COMMANDS = {"/final", "/підсумок"}
 USER_HELP_COMMANDS = {"/help", "/команди"}
@@ -51,6 +49,7 @@ MEETING_CREATE_GLOBAL_COOLDOWN_SEC = 90
 ALL_ADMIN_COMMANDS = (
     ADMIN_MEETING_COMMANDS
     | ADMIN_WHO_COMMANDS
+    | ADMIN_LIST_COMMANDS
     | ADMIN_CLOSE_COMMANDS
     | ADMIN_FINAL_COMMANDS
     | ADMIN_HELP_COMMANDS
@@ -398,6 +397,16 @@ def split_command_and_args(text: str):
     return cmd, args
 
 
+def contains_trigger_keyword(text: str) -> bool:
+    low = text.lower()
+    compact = " ".join(re.sub(r"[^\w\sа-яіїєґ']", " ", low, flags=re.IGNORECASE).split())
+    if any(keyword in low for keyword in KEYWORDS):
+        return True
+    # Fallback for common word forms/typos around target words.
+    fuzzy = ("дайвінч", "daiv", "волейбол", "волейб", "volley")
+    return any(token in compact for token in fuzzy)
+
+
 def parse_meeting_id_arg(args: str) -> int | None:
     value = args.strip()
     if not value:
@@ -441,13 +450,10 @@ def parse_meeting_payload(args: str) -> dict:
             f"Дата: {date}\n"
             f"Час (база): {time_value}\n"
             f"Місце: {place}\n\n"
-            "Голосуйте, хто може прийти.\n"
+            "Голосуйте.\n"
             "Відповідайте реплаєм на це повідомлення:\n"
-            "+ або + 19:00 якщо будете\n"
-            "- якщо не будете\n\n"
-            f"Якщо {time_value} не підходить — пропонуйте свій час у форматі “+ 14:30”.\n"
-            "Будь хитрим лисом 😁\n"
-            "Будьте активними 😜"
+            "+ або + 16:00 якщо будете\n"
+            "- якщо не будете"
         )
         return {"topic": topic, "date": date, "time": time_value, "place": place, "text": text}
 
@@ -462,8 +468,9 @@ def parse_meeting_payload(args: str) -> dict:
             f"Дата: {date}\n"
             f"Час (база): {time_value}\n"
             f"Місце: {place}\n\n"
-            "Голосування: відповідайте реплаєм на це повідомлення\n"
-            "+ або + 19:00 якщо будете\n"
+            "Голосуйте.\n"
+            "Відповідайте реплаєм на це повідомлення:\n"
+            "+ або + 16:00 якщо будете\n"
             "- якщо не будете"
         )
         return {"topic": topic, "date": date, "time": time_value, "place": place, "text": text}
@@ -473,13 +480,10 @@ def parse_meeting_payload(args: str) -> dict:
         "Дата: Не вказано\n"
         "Час (база): Не вказано\n"
         "Місце: Не вказано\n\n"
-        "Голосуйте, хто може прийти.\n"
+        "Голосуйте.\n"
         "Відповідайте реплаєм на це повідомлення:\n"
-        "+ або + 19:00 якщо будете\n"
-        "- якщо не будете\n\n"
-        "Якщо час не підходить — пропонуйте свій у форматі “+ 14:30”.\n"
-        "Будь хитрим лисом 😁\n"
-        "Будьте активними 😜"
+        "+ або + 16:00 якщо будете\n"
+        "- якщо не будете"
     )
     return {"topic": args, "date": "Не вказано", "time": "Не вказано", "place": "Не вказано", "text": text}
 
@@ -585,6 +589,8 @@ def build_user_help_text() -> str:
         "Показати список учасників активного збору.\n\n"
         "/who <id>\n"
         "Показати підсумок конкретного збору за ID (наприклад: /who 3).\n\n"
+        "/meetings\n"
+        "Показати активний і останні закриті збори.\n\n"
         "/meeting <дата> | <час> | <місце> | <текст>\n"
         "Доступно всім учасникам групи (є антифлуд).\n"
         "У <текст> пиши вид активності + за бажанням короткий опис.\n"
@@ -607,6 +613,8 @@ def build_admin_help_text() -> str:
         "Поточний активний збір.\n\n"
         "/who <id>\n"
         "Конкретний збір за ID (активний або архів), наприклад: /who 3.\n\n"
+        "/meetings\n"
+        "Активний + останні закриті збори.\n\n"
         "3) Закрити збір:\n"
         "/close <час>\n"
         "Закрити і відправити фінал у групу.\n\n"
@@ -670,7 +678,7 @@ async def maybe_auto_finalize_meeting(chat, chat_key: str):
         return
 
     active_event["is_open"] = False
-    events_state[chat_key] = active_event
+    events_state.pop(chat_key, None)
     state["events"] = events_state
     archive_event(chat_key, active_event)
     save_state(state)
@@ -703,6 +711,41 @@ def find_event_by_meeting_id(chat_key: str, meeting_id: int):
         if int(row.get("meeting_id", 0) or 0) == meeting_id:
             return row, "history"
     return None, ""
+
+
+def render_meetings_list(chat_key: str) -> str:
+    lines = ["Мітінги:"]
+    active = events_state.get(chat_key)
+    if active and active.get("is_open", True):
+        mid = int(active.get("meeting_id", 0) or 0)
+        topic = str(active.get("topic", "Зустріч"))
+        date = str(active.get("date", "Не вказано"))
+        time_value = str(active.get("time", "Не вказано"))
+        lines.append(f"Активний: #{mid} | {topic} | {date} {time_value}")
+    else:
+        lines.append("Активний: немає")
+
+    history_rows = state.get("events_history", {}).get(chat_key, [])
+    if not history_rows:
+        lines.append("")
+        lines.append("Закриті: немає")
+        return "\n".join(lines)
+
+    lines.append("")
+    lines.append("Останні закриті:")
+    sorted_rows = sorted(
+        history_rows,
+        key=lambda x: int(x.get("meeting_id", 0) or 0),
+        reverse=True,
+    )
+    for row in sorted_rows[:10]:
+        mid = int(row.get("meeting_id", 0) or 0)
+        topic = str(row.get("topic", "Зустріч"))
+        date = str(row.get("date", "Не вказано"))
+        time_value = str(row.get("time", "Не вказано"))
+        count = len(row.get("participants", {}))
+        lines.append(f"#{mid} | {topic} | {date} {time_value} | учасників: {count}")
+    return "\n".join(lines)
 
 
 async def user_is_member_of_target_chat(user_id: int) -> bool:
@@ -960,7 +1003,7 @@ async def handle_message(event):
                 if daiv_auto_session["done"] == 0:
                     started_ts = int(daiv_auto_session.get("started_ts", now_ts) or now_ts)
                     if now_ts - started_ts < 5:
-                        return
+                        await asyncio.sleep(max(0, 5 - (now_ts - started_ts)))
 
                 end_markers = [
                     "Я більше не хочу нікого дивитись",
@@ -1104,12 +1147,16 @@ async def handle_message(event):
                 else:
                     await client.send_message(event.chat_id, f"Збір з ID #{lookup_id} не знайдено.")
                 return
-            if active_event:
+            if active_event and active_event.get("is_open", True):
                 await client.send_message(event.chat_id, render_rsvp_summary(active_event))
             else:
                 await client.send_message(
                     event.chat_id, "Активного збору немає. Для архіву: /who <id> (наприклад /who 3)"
                 )
+            return
+
+        if command in ADMIN_LIST_COMMANDS:
+            await client.send_message(event.chat_id, render_meetings_list(target_chat_key))
             return
 
         if command in ADMIN_CLOSE_COMMANDS or command in ADMIN_FINAL_COMMANDS:
@@ -1122,7 +1169,7 @@ async def handle_message(event):
                     )
                     return
                 active_event["is_open"] = False
-                events_state[target_chat_key] = active_event
+                events_state.pop(target_chat_key, None)
                 state["events"] = events_state
                 archive_event(target_chat_key, active_event)
                 save_state(state)
@@ -1179,7 +1226,13 @@ async def handle_message(event):
         chat_key = str(chat_id)
         active_event = events_state.get(chat_key)
 
-        if command in (ADMIN_MEETING_COMMANDS | ADMIN_FINAL_COMMANDS | ADMIN_WHO_COMMANDS | ADMIN_CLOSE_COMMANDS):
+        if command in (
+            ADMIN_MEETING_COMMANDS
+            | ADMIN_FINAL_COMMANDS
+            | ADMIN_WHO_COMMANDS
+            | ADMIN_CLOSE_COMMANDS
+            | ADMIN_LIST_COMMANDS
+        ):
             return
 
         if target_chat_id == 0 or chat_id != target_chat_id:
@@ -1278,7 +1331,7 @@ async def handle_message(event):
         save_state(state)
         return
 
-    if not any(keyword in text_lower for keyword in KEYWORDS):
+    if not contains_trigger_keyword(text):
         return
 
     if user_id in processed_users and user_id != TEST_USER_ID:
