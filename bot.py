@@ -7,7 +7,7 @@ import re
 import time
 from pathlib import Path
 
-from telethon import TelegramClient, events
+from telethon import Button, TelegramClient, events
 from telethon.errors import UserNotParticipantError
 from telethon.sessions import StringSession
 from telethon.tl.functions.account import UpdateStatusRequest
@@ -37,6 +37,7 @@ MEETING_TEXT_FALLBACK = (
     "- якщо не будете"
 )
 ADMIN_MEETING_COMMANDS = {"/meeting", "/discuss", "/збір", "/обговорення"}
+ADMIN_EDIT_COMMANDS = {"/editmeeting", "/редзбір"}
 ADMIN_WHO_COMMANDS = {"/who", "/rsvp", "/хто"}
 ADMIN_LIST_COMMANDS = {"/meetings", "/list", "/список"}
 ADMIN_CLOSE_COMMANDS = {"/close", "/закрити"}
@@ -48,6 +49,7 @@ MEETING_CREATE_USER_COOLDOWN_SEC = 5 * 60
 MEETING_CREATE_GLOBAL_COOLDOWN_SEC = 90
 ALL_ADMIN_COMMANDS = (
     ADMIN_MEETING_COMMANDS
+    | ADMIN_EDIT_COMMANDS
     | ADMIN_WHO_COMMANDS
     | ADMIN_LIST_COMMANDS
     | ADMIN_CLOSE_COMMANDS
@@ -57,6 +59,9 @@ ALL_ADMIN_COMMANDS = (
 )
 YES_MARKERS = {"+", "+1", "йду", "я за", "пирйду", "прийду", "я в темі", "я буду"}
 NO_MARKERS = {"-", "-1", "не йду", "не буду"}
+MEETING_BTN_YES = "✅ Йду"
+MEETING_BTN_NO = "❌ Не йду"
+MEETING_BTN_TIME = "🕒 Пропоную час"
 
 DAIVINCHIK_LIKES_RE = re.compile(r"Ти сподобався\s*(\d+)\s*дівчинам, показати їх\?", re.IGNORECASE)
 DAIVINCHIK_PROFILE_LIKED_TEXT = "Комусь сподобалась твоя анкета"
@@ -293,6 +298,12 @@ def save_state(state: dict) -> None:
 
 
 def normalize_vote(text: str):
+    raw = text.strip().lower()
+    if raw.startswith("✅") or raw == "йду":
+        return "yes"
+    if raw.startswith("❌"):
+        return "no"
+
     normalized = " ".join(
         text.lower()
         .replace(",", " ")
@@ -417,6 +428,17 @@ def parse_meeting_id_arg(args: str) -> int | None:
         return None
     parsed = int(value)
     return parsed if parsed > 0 else None
+
+
+def parse_edit_meeting_payload(args: str):
+    parts = [p.strip() for p in args.split("|")]
+    if len(parts) < 5:
+        return None, None
+    meeting_id = parse_meeting_id_arg(parts[0])
+    if meeting_id is None:
+        return None, None
+    payload = parse_meeting_payload(" | ".join(parts[1:]))
+    return meeting_id, payload
 
 
 def normalize_meeting_date(value: str) -> str:
@@ -595,6 +617,8 @@ def build_user_help_text() -> str:
         "Доступно всім учасникам групи (є антифлуд).\n"
         "У <текст> пиши вид активності + за бажанням короткий опис.\n"
         "Приклад: футбол 5x5, легка гра без жорсткого контакту.\n\n"
+        "/editmeeting <id> | <дата> | <час> | <місце> | <текст>\n"
+        "Редагувати активний збір за ID без створення нового.\n\n"
         "Для повної адмін-довідки: /helpa"
     )
 
@@ -608,6 +632,9 @@ def build_admin_help_text() -> str:
         "<текст> = вид активності + опціонально деталі.\n"
         "Напр.: футбол | або футбол + короткий опис умов.\n"
         "Приклад: /meeting завтра | 19:30 | Аркадія, 2 майданчик | волейбол\n\n"
+        "1.1) Редагувати активний збір:\n"
+        "/editmeeting <id> | <дата> | <час> | <місце> | <текст>\n"
+        "Приклад: /editmeeting 12 | сьогодні | 18:30 | Аркадія | волейбол + новачки welcome\n\n"
         "2) Перегляд голосування:\n"
         "/who\n"
         "Поточний активний збір.\n\n"
@@ -746,6 +773,29 @@ def render_meetings_list(chat_key: str) -> str:
         count = len(row.get("participants", {}))
         lines.append(f"#{mid} | {topic} | {date} {time_value} | учасників: {count}")
     return "\n".join(lines)
+
+
+def meeting_buttons():
+    return [
+        [Button.text(MEETING_BTN_YES), Button.text(MEETING_BTN_NO)],
+        [Button.text(MEETING_BTN_TIME)],
+    ]
+
+
+async def post_meeting_message(chat, text: str):
+    try:
+        return await client.send_message(chat, text, buttons=meeting_buttons())
+    except Exception as e:
+        print(f"Warning: cannot attach meeting buttons, fallback to plain text: {e}", flush=True)
+        return await client.send_message(chat, text)
+
+
+async def edit_meeting_message(chat, message_id: int, text: str):
+    try:
+        await client.edit_message(chat, message=message_id, text=text, buttons=meeting_buttons())
+    except Exception as e:
+        print(f"Warning: cannot edit meeting with buttons, fallback to plain text: {e}", flush=True)
+        await client.edit_message(chat, message=message_id, text=text)
 
 
 async def user_is_member_of_target_chat(user_id: int) -> bool:
@@ -1114,7 +1164,7 @@ async def handle_message(event):
             meeting_id = int(state.get("next_meeting_id", 1) or 1)
             state["next_meeting_id"] = meeting_id + 1
             post_text = f"ID збору: #{meeting_id}\n{payload['text']}"
-            posted = await client.send_message(target_chat, post_text)
+            posted = await post_meeting_message(target_chat, post_text)
             events_state[target_chat_key] = {
                 "message_id": int(posted.id),
                 "is_open": True,
@@ -1135,6 +1185,53 @@ async def handle_message(event):
             state["meeting_creator_last_ts"] = creator_last
             save_state(state)
             await client.send_message(event.chat_id, f"Збір #{meeting_id} створено.")
+            return
+
+        if command in ADMIN_EDIT_COMMANDS:
+            if not active_event or not active_event.get("is_open", True):
+                await client.send_message(event.chat_id, "Активного збору немає. Нема що редагувати.")
+                return
+            edit_id, payload = parse_edit_meeting_payload(command_args)
+            if edit_id is None or payload is None:
+                await client.send_message(
+                    event.chat_id,
+                    "Формат: /editmeeting <id> | <дата> | <час> | <місце> | <текст>",
+                )
+                return
+            active_id = int(active_event.get("meeting_id", 0) or 0)
+            if edit_id != active_id:
+                await client.send_message(
+                    event.chat_id,
+                    f"Редагувати можна тільки активний збір #{active_id}. Ти вказав #{edit_id}.",
+                )
+                return
+            created_by = int(active_event.get("created_by", 0) or 0)
+            if not is_admin_in_target and created_by != user_id:
+                await client.send_message(
+                    event.chat_id,
+                    "Редагувати збір може тільки автор цього збору або адмін групи.",
+                )
+                return
+
+            active_event["topic"] = payload["topic"]
+            active_event["date"] = payload["date"]
+            active_event["time"] = payload["time"]
+            active_event["place"] = payload["place"]
+            post_text = f"ID збору: #{active_id}\n{payload['text']}"
+            try:
+                await edit_meeting_message(
+                    target_chat,
+                    int(active_event.get("message_id", 0) or 0),
+                    post_text,
+                )
+            except Exception as e:
+                await client.send_message(event.chat_id, f"Не вдалося оновити пост збору: {e}")
+                return
+
+            events_state[target_chat_key] = active_event
+            state["events"] = events_state
+            save_state(state)
+            await client.send_message(event.chat_id, f"Збір #{active_id} оновлено.")
             return
 
         if command in ADMIN_WHO_COMMANDS:
@@ -1228,6 +1325,7 @@ async def handle_message(event):
 
         if command in (
             ADMIN_MEETING_COMMANDS
+            | ADMIN_EDIT_COMMANDS
             | ADMIN_FINAL_COMMANDS
             | ADMIN_WHO_COMMANDS
             | ADMIN_CLOSE_COMMANDS
@@ -1247,6 +1345,9 @@ async def handle_message(event):
             is_after_start = int(getattr(event.message, "id", 0) or 0) >= started_at
 
             vote = normalize_vote(text)
+            if (is_reply_vote or is_after_start) and text_lower.startswith("🕒") and "пропоную" in text_lower:
+                await client.send_message(chat, "Напиши реплаєм у форматі: + 16:30", reply_to=event.message.id)
+                return
             if vote and (is_reply_vote or is_after_start):
                 participants = active_event.get("participants", {})
                 uid = str(user_id)
