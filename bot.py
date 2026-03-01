@@ -43,6 +43,7 @@ ADMIN_WHO_COMMANDS = {"/who", "/rsvp", "/хто"}
 ADMIN_LIST_COMMANDS = {"/meetings", "/list", "/список"}
 ADMIN_CLOSE_COMMANDS = {"/close", "/закрити"}
 ADMIN_FINAL_COMMANDS = {"/final", "/підсумок"}
+ADMIN_SILENT_CLOSE_COMMANDS = {"/silentclose", "/тихозакрити", "/closequiet"}
 USER_HELP_COMMANDS = {"/help", "/команди"}
 ADMIN_HELP_COMMANDS = {"/helpa", "/адмінка", "/adminhelp"}
 ADMIN_AUTOLIKE_COMMANDS = {"/autolike", "/лайкстарт"}
@@ -57,6 +58,7 @@ ALL_ADMIN_COMMANDS = (
     | ADMIN_LIST_COMMANDS
     | ADMIN_CLOSE_COMMANDS
     | ADMIN_FINAL_COMMANDS
+    | ADMIN_SILENT_CLOSE_COMMANDS
     | ADMIN_HELP_COMMANDS
     | ADMIN_AUTOLIKE_COMMANDS
 )
@@ -769,6 +771,8 @@ def build_admin_help_text() -> str:
         "Закрити і відправити фінал у групу.\n\n"
         "/final <час>\n"
         "Те саме, що /close.\n\n"
+        "/silentclose\n"
+        "Тихо закрити збір без повідомлення в групу.\n\n"
         "4) Автолайк (тільки для акаунта сесії):\n"
         "/autolike <кількість>\n"
         "Запуск ручного автолайку в Дайвінчику (1..20).\n"
@@ -1575,6 +1579,28 @@ async def handle_message(event):
                 await client.send_message(event.chat_id, "Активного збору немає. Запусти /meeting")
             return
 
+        if command in ADMIN_SILENT_CLOSE_COMMANDS:
+            if active_event and active_event.get("is_open", True):
+                created_by = int(active_event.get("created_by", 0) or 0)
+                if not is_admin_in_target and created_by != user_id:
+                    await client.send_message(
+                        event.chat_id,
+                        "Тихо закрити збір може тільки автор цього збору або адмін групи.",
+                    )
+                    return
+                active_event["is_open"] = False
+                events_state.pop(target_chat_key, None)
+                state["events"] = events_state
+                archive_event(target_chat_key, active_event)
+                save_state(state)
+                await client.send_message(
+                    event.chat_id,
+                    f"Збір #{int(active_event.get('meeting_id', 0) or 0)} тихо закрито без повідомлення в групу.",
+                )
+            else:
+                await client.send_message(event.chat_id, "Активного збору немає. Запусти /meeting")
+            return
+
         if command in ADMIN_AUTOLIKE_COMMANDS:
             if user_id != self_user_id:
                 await client.send_message(
@@ -1626,6 +1652,7 @@ async def handle_message(event):
             | ADMIN_FINAL_COMMANDS
             | ADMIN_WHO_COMMANDS
             | ADMIN_CLOSE_COMMANDS
+            | ADMIN_SILENT_CLOSE_COMMANDS
             | ADMIN_LIST_COMMANDS
         ):
             return
