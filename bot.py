@@ -831,6 +831,11 @@ async def maybe_auto_finalize_meeting(chat, chat_key: str):
         return
 
     active_event["is_open"] = False
+    await unpin_meeting_message(
+        chat,
+        int(active_event.get("message_id", 0) or 0),
+        int(active_event.get("bot_message_id", 0) or 0),
+    )
     events_state.pop(chat_key, None)
     state["events"] = events_state
     archive_event(chat_key, active_event)
@@ -1020,6 +1025,43 @@ async def edit_meeting_message(chat, message_id: int, text: str, meeting_id: int
     except Exception as e:
         print(f"Warning: cannot edit meeting with buttons, fallback to plain text: {e}", flush=True)
         await client.edit_message(chat, message=message_id, text=text)
+
+
+async def pin_meeting_message(chat, message_id: int, bot_message_id: int = 0):
+    if BOT_TOKEN and bot_message_id > 0:
+        bot_chat_id = resolve_bot_chat_id(chat)
+        ok = await bot_api_call_async(
+            "pinChatMessage",
+            {
+                "chat_id": bot_chat_id,
+                "message_id": str(bot_message_id),
+                "disable_notification": "true",
+            },
+        )
+        if ok:
+            return
+    try:
+        await client.pin_message(chat, message_id, notify=False)
+    except Exception as e:
+        print(f"Warning: cannot pin meeting message: {e}", flush=True)
+
+
+async def unpin_meeting_message(chat, message_id: int, bot_message_id: int = 0):
+    if BOT_TOKEN and bot_message_id > 0:
+        bot_chat_id = resolve_bot_chat_id(chat)
+        ok = await bot_api_call_async(
+            "unpinChatMessage",
+            {
+                "chat_id": bot_chat_id,
+                "message_id": str(bot_message_id),
+            },
+        )
+        if ok:
+            return
+    try:
+        await client.unpin_message(chat, message_id)
+    except Exception as e:
+        print(f"Warning: cannot unpin meeting message: {e}", flush=True)
 
 
 async def apply_vote_to_active_meeting(
@@ -1460,6 +1502,7 @@ async def handle_message(event):
             event_data["bot_message_id"] = bot_msg_id
             event_data["bot_post_via_api"] = bool(bot_msg_id > 0)
             event_data["started_at_message_id"] = int(posted.id)
+            await pin_meeting_message(target_chat, int(posted.id), bot_msg_id)
             events_state[target_chat_key] = event_data
             state["events"] = events_state
             state["meeting_last_create_ts"] = now_ts
@@ -1566,6 +1609,11 @@ async def handle_message(event):
                     )
                     return
                 active_event["is_open"] = False
+                await unpin_meeting_message(
+                    target_chat,
+                    int(active_event.get("message_id", 0) or 0),
+                    int(active_event.get("bot_message_id", 0) or 0),
+                )
                 events_state.pop(target_chat_key, None)
                 state["events"] = events_state
                 archive_event(target_chat_key, active_event)
@@ -1589,6 +1637,11 @@ async def handle_message(event):
                     )
                     return
                 active_event["is_open"] = False
+                await unpin_meeting_message(
+                    target_chat,
+                    int(active_event.get("message_id", 0) or 0),
+                    int(active_event.get("bot_message_id", 0) or 0),
+                )
                 events_state.pop(target_chat_key, None)
                 state["events"] = events_state
                 archive_event(target_chat_key, active_event)
