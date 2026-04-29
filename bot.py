@@ -90,7 +90,7 @@ DAIV_AUTO_MIN_INTERVAL_SEC = 8 * 60 * 60
 DAIV_AUTO_MAX_INTERVAL_SEC = 9 * 60 * 60
 DAIV_AUTO_MIN_LIKES = 5
 DAIV_AUTO_MAX_LIKES = 6
-DAIV_AUTO_CONTROL_TEXTS = {"💤", "1", "1 👍", "1 🚀", "❤️"}
+DAIV_AUTO_CONTROL_TEXTS = {"💤", "1", "1 👍", "❤️"}
 DAIV_AUTO_CHECK_EVERY_SEC = 60
 DAIV_MENU_MARKERS = (
     "1. дивитися анкети",
@@ -99,6 +99,7 @@ DAIV_MENU_MARKERS = (
 )
 DAIV_WAIT_MARKERS = ("почекаємо поки хтось побачить твою анкету",)
 DAIV_SEARCHING_MARKERS = ("✨🔍",)
+DAIV_INVALID_OPTION_MARKERS = ("немає такого варіанту відповіді",)
 
 if not all([API_ID, API_HASH, SESSION_STRING, CHANNEL_ID_RAW]):
     raise RuntimeError("Set API_ID, API_HASH, SESSION_STRING, CHANNEL_ID in env")
@@ -1431,11 +1432,17 @@ async def handle_message(event):
 
                 if any(m in text_lower for m in DAIV_MENU_MARKERS):
                     if daiv_auto_session.get("phase") == "await_menu":
-                        await send_daiv_message("1 🚀", (0.8, 1.5))
+                        await send_daiv_message("1", (0.8, 1.5))
                         daiv_auto_session["phase"] = "await_profile"
                     return
 
                 if any(m in text for m in DAIV_SEARCHING_MARKERS):
+                    return
+
+                if any(m in text_lower for m in DAIV_INVALID_OPTION_MARKERS):
+                    if daiv_auto_session.get("phase") in {"await_menu", "await_profile"}:
+                        await send_daiv_message("1", (0.8, 1.5))
+                        daiv_auto_session["phase"] = "await_profile"
                     return
 
                 skip_markers = [
