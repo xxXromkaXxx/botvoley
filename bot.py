@@ -68,10 +68,18 @@ MEETING_BTN_YES = "✅ Йду"
 MEETING_BTN_NO = "❌ Не йду"
 MEETING_BTN_TIME = "🕒 Пропоную час"
 
-DAIVINCHIK_LIKES_RE = re.compile(r"Ти сподобався\s*(\d+)\s*дівчинам, показати їх\?", re.IGNORECASE)
+DAIVINCHIK_LIKES_RE = re.compile(
+    r"Ти сподобався\s*(\d+)\s*дівчин(?:і|ам)[^?\n]*показати\s*(?:її|їх)\?",
+    re.IGNORECASE,
+)
 DAIVINCHIK_PROFILE_LIKED_TEXT = "Комусь сподобалась твоя анкета"
 DAIVINCHIK_START_CHAT_TEXT = "Починай спілкуватися"
 USERNAME_RE = re.compile(r"@([A-Za-z0-9_]{4,})")
+DAIV_USERNAME_CONTEXT_MARKERS = (
+    "починай спілкуватися",
+    "гарно проведете час",
+    "комусь сподобалась твоя анкета",
+)
 OUTREACH_TEXT = (
     "Це я з дайвінчика .\n"
     "Вітаю! Збираємо нову компанію для спорту та активного дозвілля. "
@@ -82,8 +90,15 @@ DAIV_AUTO_MIN_INTERVAL_SEC = 8 * 60 * 60
 DAIV_AUTO_MAX_INTERVAL_SEC = 9 * 60 * 60
 DAIV_AUTO_MIN_LIKES = 5
 DAIV_AUTO_MAX_LIKES = 6
-DAIV_AUTO_CONTROL_TEXTS = {"💤", "1", "1 👍", "❤️"}
-DAIV_AUTO_CHECK_EVERY_SEC = 5 * 60
+DAIV_AUTO_CONTROL_TEXTS = {"💤", "1", "1 👍", "1 🚀", "❤️"}
+DAIV_AUTO_CHECK_EVERY_SEC = 60
+DAIV_MENU_MARKERS = (
+    "1. дивитися анкети",
+    "моя анкета",
+    "я більше не хочу нікого шукати",
+)
+DAIV_WAIT_MARKERS = ("почекаємо поки хтось побачить твою анкету",)
+DAIV_SEARCHING_MARKERS = ("✨🔍",)
 
 if not all([API_ID, API_HASH, SESSION_STRING, CHANNEL_ID_RAW]):
     raise RuntimeError("Set API_ID, API_HASH, SESSION_STRING, CHANNEL_ID in env")
@@ -1144,6 +1159,30 @@ async def invite_username_to_target_chat(username: str):
         return False, f"invite_failed:{e}"
 
 
+async def process_daiv_username(username: str):
+    username = str(username or "").strip().lstrip("@").lower()
+    if not username:
+        return
+
+    invite_ok, invite_status = await invite_username_to_target_chat(username)
+    if not invite_ok:
+        print(f"Warning: cannot add @{username} to target chat: {invite_status}", flush=True)
+
+    if username in contacted_usernames or invite_status == "already_member":
+        return
+
+    try:
+        dm_text = OUTREACH_TEXT
+        if invite_ok and invite_status == "invited":
+            dm_text += "\n\nТебе вже додано в групу 🙂"
+        await client.send_message(f"@{username}", dm_text)
+        contacted_usernames.add(username)
+        state["contacted_usernames"] = sorted(contacted_usernames)
+        save_state(state)
+    except Exception as e:
+        print(f"Warning: cannot outreach @{username}: {e}", flush=True)
+
+
 async def resolve_channel_entity_safe():
     try:
         dialogs = await client.get_dialogs(limit=200)
@@ -1217,11 +1256,17 @@ async def finish_daiv_auto_session(force_sleep: bool = False):
         return
     daiv_auto_session["active"] = False
     daiv_auto_session["cooldown_until"] = int(time.time()) + 120
+    daiv_auto_session["phase"] = "idle"
     if force_sleep:
         try:
             await send_daiv_message("💤", (0.7, 1.3))
         except Exception:
             pass
+
+
+async def start_daiv_auto_iteration():
+    daiv_auto_session["phase"] = "await_menu"
+    await send_daiv_message("💤")
 
 
 async def start_daiv_auto_session():
@@ -1232,10 +1277,10 @@ async def start_daiv_auto_session():
     daiv_auto_session["target"] = random.randint(DAIV_AUTO_MIN_LIKES, DAIV_AUTO_MAX_LIKES)
     daiv_auto_session["started_ts"] = int(time.time())
     daiv_auto_session["cooldown_until"] = 0
+    daiv_auto_session["phase"] = "boot"
     try:
         schedule_next_daiv_auto_run()
-        await send_daiv_message("💤")
-        await send_daiv_message("1", (2.0, 3.0))
+        await start_daiv_auto_iteration()
     except Exception as e:
         print(f"Warning: cannot start daiv auto session: {e}", flush=True)
         await finish_daiv_auto_session(force_sleep=True)
@@ -1249,10 +1294,10 @@ async def start_daiv_auto_session_with_target(target_likes: int):
     daiv_auto_session["target"] = max(1, min(20, int(target_likes)))
     daiv_auto_session["started_ts"] = int(time.time())
     daiv_auto_session["cooldown_until"] = 0
+    daiv_auto_session["phase"] = "boot"
     try:
         schedule_next_daiv_auto_run()
-        await send_daiv_message("💤")
-        await send_daiv_message("1", (2.0, 3.0))
+        await start_daiv_auto_iteration()
         return True
     except Exception as e:
         print(f"Warning: cannot start manual daiv auto session: {e}", flush=True)
@@ -1296,7 +1341,15 @@ client = TelegramClient(StringSession(SESSION_STRING), API_ID, API_HASH)
 channel_entity = None
 self_user_id = 0
 last_bot_daiv_action_ts = 0
-daiv_auto_session = {"active": False, "done": 0, "target": 0, "started_ts": 0, "cooldown_until": 0}
+daiv_auto_session = {
+    "active": False,
+    "done": 0,
+    "target": 0,
+    "started_ts": 0,
+    "cooldown_until": 0,
+    "phase": "idle",
+}
+daiv_flow_state = {"awaiting_username_until": 0}
 
 
 @client.on(events.NewMessage())
@@ -1333,43 +1386,36 @@ async def handle_message(event):
         if likes_match:
             likes_count = int(likes_match.group(1))
             if likes_count > 0:
-                await send_daiv_message("1 👍")
+                daiv_flow_state["awaiting_username_until"] = now_ts + 180
+                await send_daiv_message("1")
             return
 
         if DAIVINCHIK_PROFILE_LIKED_TEXT.lower() in text_lower:
+            daiv_flow_state["awaiting_username_until"] = now_ts + 180
             await send_daiv_message("❤️")
             return
 
         if DAIVINCHIK_START_CHAT_TEXT.lower() in text_lower:
-            username_match = USERNAME_RE.search(text)
-            if username_match:
-                username = username_match.group(1).lower()
-                invite_ok, invite_status = await invite_username_to_target_chat(username)
-                if not invite_ok:
-                    print(f"Warning: cannot add @{username} to target chat: {invite_status}", flush=True)
+            daiv_flow_state["awaiting_username_until"] = now_ts + 240
 
-                if username not in contacted_usernames and invite_status != "already_member":
-                    try:
-                        dm_text = OUTREACH_TEXT
-                        if invite_ok and invite_status == "invited":
-                            dm_text += "\n\nТебе вже додано в групу 🙂"
-                        await client.send_message(f"@{username}", dm_text)
-                        contacted_usernames.add(username)
-                        state["contacted_usernames"] = sorted(contacted_usernames)
-                        save_state(state)
-                    except Exception as e:
-                        print(f"Warning: cannot outreach @{username}: {e}", flush=True)
+        username_match = USERNAME_RE.search(text)
+        should_process_username = False
+        if username_match:
+            if int(daiv_flow_state.get("awaiting_username_until", 0) or 0) >= now_ts:
+                should_process_username = True
+            elif any(marker in text_lower for marker in DAIV_USERNAME_CONTEXT_MARKERS):
+                should_process_username = True
+            elif DAIVINCHIK_START_CHAT_TEXT.lower() in text_lower:
+                should_process_username = True
+        if should_process_username:
+            username = username_match.group(1).lower()
+            await process_daiv_username(username)
+            daiv_flow_state["awaiting_username_until"] = 0
             return
 
         # Auto-like session for profile browsing in Daiv chat.
         if daiv_auto_session["active"]:
             try:
-                # After sending "1", wait 4-5s before first possible like.
-                if daiv_auto_session["done"] == 0:
-                    started_ts = int(daiv_auto_session.get("started_ts", now_ts) or now_ts)
-                    if now_ts - started_ts < 5:
-                        await asyncio.sleep(max(0, 5 - (now_ts - started_ts)))
-
                 end_markers = [
                     "Я більше не хочу нікого дивитись",
                     "більше немає",
@@ -1380,6 +1426,18 @@ async def handle_message(event):
                     await finish_daiv_auto_session(force_sleep=True)
                     return
 
+                if any(m in text_lower for m in DAIV_WAIT_MARKERS):
+                    return
+
+                if any(m in text_lower for m in DAIV_MENU_MARKERS):
+                    if daiv_auto_session.get("phase") == "await_menu":
+                        await send_daiv_message("1 🚀", (0.8, 1.5))
+                        daiv_auto_session["phase"] = "await_profile"
+                    return
+
+                if any(m in text for m in DAIV_SEARCHING_MARKERS):
+                    return
+
                 skip_markers = [
                     "Ти сподобався",
                     "Комусь сподобалась твоя анкета",
@@ -1388,11 +1446,13 @@ async def handle_message(event):
                 if any(m.lower() in text_lower for m in skip_markers):
                     return
 
-                if daiv_auto_session["done"] < daiv_auto_session["target"]:
+                if daiv_auto_session["done"] < daiv_auto_session["target"] and daiv_auto_session.get("phase") == "await_profile":
                     await send_daiv_message("❤️", (2.0, 2.4))
                     daiv_auto_session["done"] += 1
                     if daiv_auto_session["done"] >= daiv_auto_session["target"]:
                         await finish_daiv_auto_session(force_sleep=True)
+                    else:
+                        await start_daiv_auto_iteration()
                 return
             except Exception as e:
                 print(f"Warning: daiv auto-like flow failed: {e}", flush=True)
