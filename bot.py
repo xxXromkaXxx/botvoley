@@ -86,8 +86,8 @@ OUTREACH_TEXT = (
     "Зараз плануємо волейбол і шукаємо нових людей у команду. "
     "Будемо раді бачити тебе 🙂"
 )
-DAIV_AUTO_MIN_INTERVAL_SEC = 8 * 60 * 60
-DAIV_AUTO_MAX_INTERVAL_SEC = 9 * 60 * 60
+DAIV_AUTO_MIN_INTERVAL_SEC = 3 * 60 * 60
+DAIV_AUTO_MAX_INTERVAL_SEC = 4 * 60 * 60
 DAIV_AUTO_MIN_LIKES = 5
 DAIV_AUTO_MAX_LIKES = 6
 DAIV_AUTO_CONTROL_TEXTS = {"💤", "1", "1 👍", "❤️"}
